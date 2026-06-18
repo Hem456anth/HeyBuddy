@@ -1,0 +1,15 @@
+# Phase 1 — runnable shell (no network)
+PyQt6==6.7.0
+pystray==0.19.4
+sounddevice==0.4.6
+numpy==1.26.2
+mss==9.0.1
+pillow==10.1.0
+python-dotenv==1.0.0
+
+# Phase 2 — pulled in early so `pip install -r requirements.txt` doesn't
+# resolve twice when the network pipeline lands. Not imported anywhere in
+# Phase 1 source.
+requests==2.31.0
+pydub==0.25.1
+websocket-client==1.7.0

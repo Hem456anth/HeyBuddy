@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project
+config/secrets.json
+config/settings.local.json
+.env
+.env.local
+logs/
+*.log
+recordings/
+screenshots/
+
+# PyInstaller artifacts
+build/
+dist/
+*.spec.bak
+
+# Worker
+worker/node_modules/
+worker/.dev.vars
+worker/.wrangler/

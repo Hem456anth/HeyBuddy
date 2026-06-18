@@ -1,0 +1,24 @@
+{
+  "worker_url": "https://your-worker.workers.dev",
+  "hotkey": "ctrl+alt",
+  "model": "claude-sonnet-4-6",
+  "tts_enabled": true,
+  "screen_capture_enabled": true,
+  "transient_cursor_mode": false,
+  "autostart_enabled": false,
+  "audio": {
+    "sample_rate": 16000,
+    "channels": 1,
+    "chunk_size": 1024
+  },
+  "ui": {
+    "panel_width": 420,
+    "panel_height": 560,
+    "always_on_top": true,
+    "theme": "dark"
+  },
+  "transcription": {
+    "provider": "assemblyai",
+    "language": "en"
+  }
+}
