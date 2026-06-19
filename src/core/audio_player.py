@@ -18,10 +18,19 @@ from __future__ import annotations
 
 import io
 import threading
+import warnings
 
 import numpy as np
 import sounddevice as sd
-from pydub import AudioSegment
+
+# pydub emits a RuntimeWarning at import time when it can't find ffmpeg on
+# PATH. We DO find ffmpeg — via the imageio-ffmpeg bundle — but that
+# discovery happens AFTER pydub finishes importing, so the warning fires
+# every launch even though it's not actually true. Suppress it at the
+# narrowest possible scope (this one import) rather than globally.
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=RuntimeWarning, module="pydub")
+    from pydub import AudioSegment
 
 from ..utils.logger import get_logger
 

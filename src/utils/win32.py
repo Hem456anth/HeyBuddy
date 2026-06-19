@@ -209,6 +209,28 @@ _kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 _kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
 _kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 
+# DPI awareness entry points. Same lesson as SetWindowsHookExW: declare
+# argtypes so the pointer-typed `DPI_AWARENESS_CONTEXT` survives on x64.
+if hasattr(_user32, "SetProcessDpiAwarenessContext"):
+    _user32.SetProcessDpiAwarenessContext.argtypes = (ctypes.c_void_p,)
+    _user32.SetProcessDpiAwarenessContext.restype = wintypes.BOOL
+if hasattr(_user32, "SetProcessDPIAware"):
+    _user32.SetProcessDPIAware.argtypes = ()
+    _user32.SetProcessDPIAware.restype = wintypes.BOOL
+if _shcore is not None:
+    if hasattr(_shcore, "SetProcessDpiAwareness"):
+        _shcore.SetProcessDpiAwareness.argtypes = (ctypes.c_int,)
+        _shcore.SetProcessDpiAwareness.restype = ctypes.c_long  # HRESULT
+    if hasattr(_shcore, "GetDpiForMonitor"):
+        # GetDpiForMonitor(HMONITOR, MONITOR_DPI_TYPE, *UINT, *UINT) -> HRESULT
+        _shcore.GetDpiForMonitor.argtypes = (
+            wintypes.HMONITOR,
+            ctypes.c_int,
+            ctypes.POINTER(wintypes.UINT),
+            ctypes.POINTER(wintypes.UINT),
+        )
+        _shcore.GetDpiForMonitor.restype = ctypes.c_long
+
 
 # ---------------------------------------------------------------------------
 # DPI / monitor helpers

@@ -201,6 +201,13 @@ def main() -> int:
     interpreter_nudge.start(250)
     interpreter_nudge.timeout.connect(lambda: None)
 
+    # Show the panel once on launch so the user immediately sees the app is
+    # running. Windows hides new tray icons under the chevron by default, so
+    # without this the only feedback is the (often invisible) tray icon and
+    # a silent terminal. Closing the panel sends it back to tray-only mode.
+    panel.show()
+    panel.raise_()
+
     log.info("HeyClicky started. Hold Ctrl+Alt anywhere to talk.")
     try:
         return qt_app.exec()
