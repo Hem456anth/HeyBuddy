@@ -5,7 +5,14 @@ decoding so we don't pull `simpleaudio` (needs a C toolchain) or `playsound`
 (flaky on Windows). The decoded `AudioSegment` gives us raw PCM that
 sounddevice plays via `sd.play`.
 
-Phase 1 does not import this module — it is here ready for Phase 2 wiring.
+ffmpeg discovery: pydub shells out to `ffmpeg` on PATH to decode MP3. Rather
+than make the user install ffmpeg system-wide, we depend on `imageio-ffmpeg`
+which ships a static ffmpeg binary inside the venv via pip. At import time
+we point `AudioSegment.converter` at that binary so playback works
+out-of-the-box on a fresh venv with no PATH manipulation. If
+`imageio-ffmpeg` isn't installed we fall back silently to whatever's on
+PATH (pydub's default behavior), so the module is still importable in
+environments that have ffmpeg installed system-wide.
 """
 from __future__ import annotations
 
@@ -19,6 +26,30 @@ from pydub import AudioSegment
 from ..utils.logger import get_logger
 
 log = get_logger(__name__)
+
+
+def _configure_pydub_ffmpeg() -> None:
+    """Point pydub at the imageio-ffmpeg static binary if available.
+
+    Called once at module import. Idempotent — re-running is harmless.
+    """
+    try:
+        import imageio_ffmpeg
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        log.debug(
+            "imageio-ffmpeg not available; pydub will look for ffmpeg on PATH"
+        )
+        return
+    AudioSegment.converter = ffmpeg_path
+    # pydub also uses ffprobe for some operations; ffprobe ships in the same
+    # imageio-ffmpeg bundle on most platforms but the package exposes only
+    # ffmpeg. We leave ffprobe alone — pydub falls back to ffmpeg for the
+    # probe operations we actually use (mp3 -> raw PCM).
+    log.info("pydub configured to use bundled ffmpeg: %s", ffmpeg_path)
+
+
+_configure_pydub_ffmpeg()
 
 
 class AudioPlayer:

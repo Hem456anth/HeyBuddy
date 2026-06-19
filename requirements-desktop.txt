@@ -12,4 +12,7 @@ python-dotenv==1.0.0
 # Phase 1 source.
 requests==2.31.0
 pydub==0.25.1
+# Ships a static ffmpeg binary so pydub can decode ElevenLabs MP3 responses
+# without requiring a system-wide ffmpeg install.
+imageio-ffmpeg==0.5.1
 websocket-client==1.7.0
