@@ -58,7 +58,7 @@ git clone <this repo>
 cd heyclicky
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-desktop.txt
 ```
 
 ### 3. Point HeyClicky at the Worker

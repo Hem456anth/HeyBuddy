@@ -10,7 +10,7 @@ if not exist .venv\Scripts\python.exe (
     echo No virtualenv found at .venv. Run:
     echo     python -m venv .venv
     echo     .venv\Scripts\activate
-    echo     pip install -r requirements.txt
+    echo     pip install -r requirements-desktop.txt
     echo     pip install pyinstaller
     exit /b 1
 )

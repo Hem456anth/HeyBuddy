@@ -38,7 +38,10 @@ build/
 dist/
 *.spec.bak
 
-# Worker
+# Worker (both root-level and worker/-level, since we have two wrangler configs)
+node_modules/
+.dev.vars
+.wrangler/
 worker/node_modules/
 worker/.dev.vars
 worker/.wrangler/

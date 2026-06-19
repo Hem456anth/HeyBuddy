@@ -167,7 +167,9 @@ All four flags are applied via `utils.win32.apply_overlay_window_styles`.
 heyclicky/
 ├── CLAUDE.md                              ← you are here
 ├── README.md                              ← user-facing quick start, credits upstream
-├── requirements.txt
+├── requirements-desktop.txt           ← Python deps (renamed from requirements.txt so Cloudflare Workers Builds doesn't auto-detect this as a Python project)
+├── wrangler.toml                      ← top-level Workers config for Cloudflare auto-detect
+├── package.json                       ← top-level Workers manifest (wrangler devDep)
 ├── heyclicky.spec                         ← PyInstaller one-file build recipe
 ├── build.bat                              ← convenience wrapper around PyInstaller
 ├── config/
@@ -260,7 +262,7 @@ These mirror upstream `AGENTS.md` adapted for Python.
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-desktop.txt
 
 # Verify hotkey + recording end-to-end before anything else:
 python -m src.tools.smoke_test

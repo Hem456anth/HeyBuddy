@@ -10,6 +10,21 @@ project HeyClicky ports. Only the worker `name` in `wrangler.toml` has been
 renamed (`clicky-proxy` → `heyclicky-proxy`) so deploying it doesn't collide
 with the upstream worker if both exist on the same Cloudflare account.
 
+## Two wrangler configs (intentional)
+
+There are two `wrangler.toml` files in the repo:
+
+* **`/wrangler.toml`** (repo root) — read by Cloudflare Workers Builds. Its
+  `main` is `worker/src/index.ts`. This file exists so Cloudflare correctly
+  detects the repo as a Workers project even when the project's
+  "Root directory" setting is left at its default (root). Without it,
+  Cloudflare sees `requirements-desktop.txt` and tries to install Python.
+* **`/worker/wrangler.toml`** — read by local development from inside this
+  folder (`cd worker && npx wrangler dev`). Its `main` is `src/index.ts`.
+
+The two configs must stay in sync. If you change `name`, `vars`,
+`compatibility_date`, etc., update both.
+
 ## Routes
 
 | Route | Purpose | Notes |
