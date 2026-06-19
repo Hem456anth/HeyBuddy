@@ -189,6 +189,18 @@ _user32.CallNextHookEx.argtypes = (
     ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM,
 )
 _user32.CallNextHookEx.restype = ctypes.c_long
+# SetWindowsHookExW signature:
+#   HHOOK SetWindowsHookExW(int idHook, HOOKPROC lpfn, HINSTANCE hmod, DWORD)
+# Without argtypes declared, ctypes defaults to `c_int` for every argument
+# and overflows on 64-bit Windows where `hmod` is a 64-bit pointer
+# (raises "OverflowError: int too long to convert"). Declare them as
+# c_void_p so the module handle round-trips correctly.
+_user32.SetWindowsHookExW.argtypes = (
+    ctypes.c_int,
+    ctypes.c_void_p,     # HOOKPROC — _HookProc instances expose their address
+    ctypes.c_void_p,     # HINSTANCE / HMODULE — pointer-sized on x64
+    wintypes.DWORD,
+)
 _user32.SetWindowsHookExW.restype = ctypes.c_void_p
 _user32.UnhookWindowsHookEx.argtypes = (ctypes.c_void_p,)
 _user32.UnhookWindowsHookEx.restype = wintypes.BOOL
