@@ -3,7 +3,7 @@
 Layout:
 
     +--------------------------------------+
-    | HeyClicky                  [⚙] [✕]   |
+    | HeyBuddy                  [⚙] [✕]   |
     +--------------------------------------+
     |  State chip: idle | listening | ...  |
     |  --------------------------------    |
@@ -11,7 +11,7 @@ Layout:
     |  --------------------------------    |
     |  [ type a message...      ] [Send]   |
     |  Hint: Hold Ctrl+Alt anywhere to     |
-    |        talk to HeyClicky.            |
+    |        talk to HeyBuddy.            |
     +--------------------------------------+
 """
 from __future__ import annotations
@@ -75,7 +75,7 @@ class MainPanel(QWidget):
 
         # Title bar
         title_row = QHBoxLayout()
-        title = QLabel("HeyClicky")
+        title = QLabel("HeyBuddy")
         title_font = QFont("Segoe UI", 14, QFont.Weight.DemiBold)
         title.setFont(title_font)
 

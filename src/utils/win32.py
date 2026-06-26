@@ -1,4 +1,4 @@
-"""All Win32 / ctypes interop for HeyClicky.
+"""All Win32 / ctypes interop for HeyBuddy.
 
 Per the project conventions documented in `CLAUDE.md`, every `ctypes` call in
 the codebase lives here. Other modules import named helpers from this file.
@@ -579,14 +579,14 @@ def resolve_hotkey_chord(name: str) -> tuple[tuple[int, ...], ...]:
 #
 # Lives in `win32.py` because it's a Windows-only registry concern even
 # though `winreg` is stdlib (not `ctypes`). Keeping all OS-specific surface
-# in one module means anyone porting HeyClicky to mac/Linux only has to
+# in one module means anyone porting HeyBuddy to mac/Linux only has to
 # shim this file.
 # ---------------------------------------------------------------------------
 
 import winreg  # noqa: E402  — kept here so the module's purpose stays obvious
 
 _AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-_AUTOSTART_VALUE_NAME = "HeyClicky"
+_AUTOSTART_VALUE_NAME = "HeyBuddy"
 
 
 def is_autostart_enabled() -> bool:

@@ -1,4 +1,4 @@
-"""HeyClicky entry point (Phase 1).
+"""HeyBuddy entry point (Phase 1).
 
 Boots:
 
@@ -112,7 +112,7 @@ def _build_tray_icon(
         QMetaObject.invokeMethod(qt_app, "quit", Qt.ConnectionType.QueuedConnection)
 
     menu = pystray.Menu(
-        pystray.MenuItem("Open HeyClicky", on_open_panel, default=True),
+        pystray.MenuItem("Open HeyBuddy", on_open_panel, default=True),
         pystray.MenuItem("Settings...", on_open_settings),
         pystray.MenuItem("Cancel current turn", on_cancel),
         pystray.Menu.SEPARATOR,
@@ -208,7 +208,7 @@ def main() -> int:
     panel.show()
     panel.raise_()
 
-    log.info("HeyClicky started. Hold Ctrl+Alt anywhere to talk.")
+    log.info("HeyBuddy started. Hold Ctrl+Alt anywhere to talk.")
     try:
         return qt_app.exec()
     finally:
@@ -218,7 +218,7 @@ def main() -> int:
             tray_icon.stop()
         except Exception:
             pass
-        log.info("HeyClicky exited")
+        log.info("HeyBuddy exited")
 
 
 if __name__ == "__main__":

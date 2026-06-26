@@ -36,7 +36,7 @@ def _configure_root() -> None:
     root.addHandler(console)
 
     file_handler = RotatingFileHandler(
-        LOGS_DIR / "heyclicky.log",
+        LOGS_DIR / "heybuddy.log",
         maxBytes=1_000_000,
         backupCount=3,
         encoding="utf-8",

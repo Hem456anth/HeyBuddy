@@ -1,7 +1,7 @@
 {
-  "name": "heyclicky-proxy",
+  "name": "heybuddy-proxy",
   "private": true,
-  "description": "Cloudflare Worker proxy for HeyClicky (Windows port of farzaa/clicky). Mirrors worker/package.json so Cloudflare Workers Builds detects this as a Workers project at the repo root.",
+  "description": "Cloudflare Worker proxy for HeyBuddy (Windows port of farzaa/clicky). Mirrors worker/package.json so Cloudflare Workers Builds detects this as a Workers project at the repo root.",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"

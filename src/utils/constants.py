@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-APP_NAME = "HeyClicky"
+APP_NAME = "HeyBuddy"
 APP_VERSION = "0.1.0"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -31,7 +31,7 @@ POINT_TAG_PATTERN = r"\[POINT:(\d+),(\d+):([^:\]]+)(?::screen(\d+))?\]"
 # the upstream Clicky prompt: coordinates are in each monitor's *logical*
 # pixel space (post-DPI scale) and we enumerate monitors with 1-based indexes.
 DEFAULT_SYSTEM_PROMPT = (
-    "You are HeyClicky, a friendly Windows desktop AI companion. "
+    "You are HeyBuddy, a friendly Windows desktop AI companion. "
     "You can see the user's screen via screenshots and help them learn. "
     "When you want to point at something on screen, include a tag of the form "
     "[POINT:x,y:label:screenN] where x,y are logical pixel coordinates inside "

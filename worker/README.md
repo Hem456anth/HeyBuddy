@@ -1,13 +1,13 @@
-# HeyClicky Worker
+# HeyBuddy Worker
 
-Cloudflare Worker proxy that mediates the three upstream APIs HeyClicky talks
+Cloudflare Worker proxy that mediates the three upstream APIs HeyBuddy talks
 to — Anthropic, AssemblyAI, ElevenLabs — so the desktop client never ships
 with raw API keys.
 
 This source is copied unchanged from
 [farzaa/clicky](https://github.com/farzaa/clicky/tree/main/worker), the macOS
-project HeyClicky ports. Only the worker `name` in `wrangler.toml` has been
-renamed (`clicky-proxy` → `heyclicky-proxy`) so deploying it doesn't collide
+project HeyBuddy ports. Only the worker `name` in `wrangler.toml` has been
+renamed (`clicky-proxy` → `heybuddy-proxy`) so deploying it doesn't collide
 with the upstream worker if both exist on the same Cloudflare account.
 
 ## Two wrangler configs (intentional)
@@ -52,7 +52,7 @@ npx wrangler secret put ELEVENLABS_API_KEY
 
 `ELEVENLABS_VOICE_ID` is a Worker **variable** (not secret) so it lives in
 `wrangler.toml`. Replace the default with the ElevenLabs voice you want
-HeyClicky to speak with.
+HeyBuddy to speak with.
 
 ### Deploy
 
@@ -86,7 +86,7 @@ echo 'ELEVENLABS_API_KEY = "..."'         >> .dev.vars
 echo 'ELEVENLABS_VOICE_ID = "..."'        >> .dev.vars
 
 npx wrangler dev
-# Point HeyClicky's worker_url at http://127.0.0.1:8787 while developing.
+# Point HeyBuddy's worker_url at http://127.0.0.1:8787 while developing.
 ```
 
 ## License

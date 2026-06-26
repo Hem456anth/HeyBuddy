@@ -1,11 +1,11 @@
-# CLAUDE.md — HeyClicky source of truth
+# CLAUDE.md — HeyBuddy source of truth
 
-This file is the canonical reference for HeyClicky's architecture, file layout,
+This file is the canonical reference for HeyBuddy's architecture, file layout,
 conventions, and Worker contract. Every future turn should read this first.
 When you change something documented here, update this file per the
 [Self-Update](#self-update-instructions) section at the bottom.
 
-HeyClicky is the Windows port of
+HeyBuddy is the Windows port of
 [farzaa/clicky](https://github.com/farzaa/clicky). The Cloudflare Worker proxy
 is reused unchanged. The shipped client holds **no API keys**.
 
@@ -13,7 +13,7 @@ is reused unchanged. The shipped client holds **no API keys**.
 
 ## Overview
 
-HeyClicky is a Windows system-tray companion app with no taskbar button. The
+HeyBuddy is a Windows system-tray companion app with no taskbar button. The
 tray icon opens a custom floating panel. Audio capture is push-to-talk via a
 global `Ctrl+Alt` low-level keyboard hook. Recorded PCM goes to AssemblyAI
 realtime v3 over websocket. The transcript plus a screenshot is sent to Claude
@@ -46,7 +46,7 @@ wired end-to-end and all polish items have landed:
 - **Transient cursor mode**: panel auto-hides when listening begins
 - **Auto-clearing error banner** at the top of the panel
 - **Windows autostart** via HKCU Run key (`utils.win32.enable_autostart`)
-- **PyInstaller one-file build** via `heyclicky.spec` + `build.bat`
+- **PyInstaller one-file build** via `heybuddy.spec` + `build.bat`
 
 Runtime prerequisite: `config/settings.json -> worker_url` must point at the
 deployed Cloudflare Worker. Without it, the network calls fail at first turn.
@@ -164,13 +164,13 @@ All four flags are applied via `utils.win32.apply_overlay_window_styles`.
 ## File layout
 
 ```
-heyclicky/
+heybuddy/
 ├── CLAUDE.md                              ← you are here
 ├── README.md                              ← user-facing quick start, credits upstream
 ├── requirements-desktop.txt           ← Python deps (renamed from requirements.txt so Cloudflare Workers Builds doesn't auto-detect this as a Python project)
 ├── wrangler.toml                      ← top-level Workers config for Cloudflare auto-detect
 ├── package.json                       ← top-level Workers manifest (wrangler devDep)
-├── heyclicky.spec                         ← PyInstaller one-file build recipe
+├── heybuddy.spec                         ← PyInstaller one-file build recipe
 ├── build.bat                              ← convenience wrapper around PyInstaller
 ├── config/
 │   └── settings.json                      ← user-editable runtime config

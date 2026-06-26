@@ -1,4 +1,4 @@
-name = "heyclicky-proxy"
+name = "heybuddy-proxy"
 main = "src/index.ts"
 compatibility_date = "2024-01-01"
 

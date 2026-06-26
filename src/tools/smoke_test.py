@@ -94,7 +94,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, lambda *_: shutdown_event.set())
 
     print(
-        "HeyClicky smoke test running.\n"
+        "HeyBuddy smoke test running.\n"
         "  Hold Ctrl+Alt anywhere, speak, release.\n"
         "  WAVs land in ./recordings/.\n"
         "  Press Ctrl+C in this terminal to exit."

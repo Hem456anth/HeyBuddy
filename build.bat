@@ -1,5 +1,5 @@
 @echo off
-REM Build HeyClicky into a single Windows executable.
+REM Build HeyBuddy into a single Windows executable.
 REM Requires the project's virtual environment to be active and
 REM `pip install pyinstaller` to have been run.
 
@@ -21,12 +21,12 @@ REM Clean old artifacts so we never ship stale code.
 if exist build rmdir /s /q build
 if exist dist  rmdir /s /q dist
 
-pyinstaller heyclicky.spec
+pyinstaller heybuddy.spec
 if errorlevel 1 (
     echo Build failed.
     exit /b 1
 )
 
 echo.
-echo Built dist\HeyClicky.exe
+echo Built dist\HeyBuddy.exe
 echo Run it directly or copy it onto a thumb drive — it is one file.

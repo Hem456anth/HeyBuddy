@@ -1,12 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for HeyClicky.
+"""PyInstaller spec for HeyBuddy.
 
 Build:
 
     pip install pyinstaller
-    pyinstaller heyclicky.spec
+    pyinstaller heybuddy.spec
 
-The output lands in `dist/HeyClicky.exe` (one-file build, no console window).
+The output lands in `dist/HeyBuddy.exe` (one-file build, no console window).
 
 Why a spec file and not a CLI invocation:
 
@@ -73,7 +73,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="HeyClicky",
+    name="HeyBuddy",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -54,7 +54,7 @@ class SettingsPanel(QDialog):
 
     def __init__(self, config: AppConfig, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("HeyClicky Settings")
+        self.setWindowTitle("HeyBuddy Settings")
         self.config = config
 
         form = QFormLayout()
@@ -105,7 +105,7 @@ class SettingsPanel(QDialog):
         self.transient_mode.setChecked(config.transient_cursor_mode)
         form.addRow(self.transient_mode)
 
-        self.autostart = QCheckBox("Launch HeyClicky at Windows sign-in")
+        self.autostart = QCheckBox("Launch HeyBuddy at Windows sign-in")
         # Trust the registry, not the persisted config, on dialog open — the
         # user may have toggled it from outside the app.
         self.autostart.setChecked(is_autostart_enabled())
@@ -176,7 +176,7 @@ class SettingsPanel(QDialog):
                     self,
                     "Autostart",
                     "Failed to write the autostart registry entry. "
-                    "Try running HeyClicky as your user (not as admin).",
+                    "Try running HeyBuddy as your user (not as admin).",
                 )
         elif not want_autostart and is_autostart_enabled():
             disable_autostart()

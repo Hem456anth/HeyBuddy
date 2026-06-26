@@ -1,4 +1,4 @@
-# HeyClicky
+# HeyBuddy
 
 A Windows port of [farzaa/clicky](https://github.com/farzaa/clicky) — an AI
 companion that lives in your system tray, can see your screen, hears your
@@ -34,7 +34,7 @@ help you learn.
 
 ### 1. Deploy the Cloudflare Worker
 
-HeyClicky reuses the upstream Worker. From the upstream repo:
+HeyBuddy reuses the upstream Worker. From the upstream repo:
 
 ```bash
 git clone https://github.com/farzaa/clicky
@@ -49,25 +49,25 @@ npx wrangler secret put ELEVENLABS_VOICE_ID   # or set as a var; ID of the voice
 npx wrangler deploy
 ```
 
-Note the deployed URL (e.g. `https://heyclicky.your-account.workers.dev`).
+Note the deployed URL (e.g. `https://heybuddy.your-account.workers.dev`).
 
-### 2. Install HeyClicky (dev / from source)
+### 2. Install HeyBuddy (dev / from source)
 
 ```powershell
 git clone <this repo>
-cd heyclicky
+cd heybuddy
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements-desktop.txt
 ```
 
-### 3. Point HeyClicky at the Worker
+### 3. Point HeyBuddy at the Worker
 
 Edit `config/settings.json`:
 
 ```json
 {
-  "worker_url": "https://heyclicky.your-account.workers.dev",
+  "worker_url": "https://heybuddy.your-account.workers.dev",
   ...
 }
 ```
@@ -107,7 +107,7 @@ pip install pyinstaller
 build.bat
 ```
 
-Produces `dist/HeyClicky.exe` — a single file you can copy to other Windows
+Produces `dist/HeyBuddy.exe` — a single file you can copy to other Windows
 machines that don't have Python installed.
 
 ---
@@ -145,7 +145,7 @@ model, Worker contract, file layout, conventions, POINT protocol).
 | Cursor flies to wrong spot on HiDPI display | Open Settings → Save once; this re-applies per-monitor DPI awareness |
 | `python -m src.main` shows a black console window | Use `pythonw -m src.main` (or just run the built `.exe`) |
 
-Logs land in `logs/heyclicky.log` (rotated, 1 MB × 3 backups).
+Logs land in `logs/heybuddy.log` (rotated, 1 MB × 3 backups).
 
 ---
 
