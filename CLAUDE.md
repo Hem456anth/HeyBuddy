@@ -180,8 +180,8 @@ heybuddy/
 │   ├── main.py                            ← PyQt bootstrap + pystray + hotkey wiring
 │   │
 │   ├── ui/
-│   │   ├── theme.py                       ← design tokens (color, radius, spacing, typography) — single source of truth, no hardcoded values elsewhere
-│   │   ├── main_window.py                 ← floating panel (frameless QWidget, dark theme)
+│   │   ├── theme.py                       ← design tokens (color, radius, spacing, typography, shadow) — single source of truth, no hardcoded values elsewhere
+│   │   ├── main_window.py                 ← floating panel: transparent outer + _PanelChrome inner with drop shadow + _DraggableTitleBar + position persistence to UIConfig
 │   │   ├── overlay_window.py              ← click-through blue cursor overlay
 │   │   └── settings_panel.py              ← settings dialog (Phase 3 expands this)
 │   │

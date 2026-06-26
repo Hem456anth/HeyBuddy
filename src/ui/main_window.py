@@ -1,24 +1,42 @@
 """Floating panel UI that pops up from the tray icon.
 
-Layout:
+Widget tree (Cycle 2 introduces the chrome / shadow split):
 
-    +--------------------------------------+
-    | HeyBuddy                  [⚙] [✕]   |
-    +--------------------------------------+
-    |  State chip: idle | listening | ...  |
-    |  --------------------------------    |
-    |  Chat scrollback (user / assistant)  |
-    |  --------------------------------    |
-    |  [ type a message...      ] [Send]   |
-    |  Hint: Hold Ctrl+Alt anywhere to     |
-    |        talk to HeyBuddy.            |
-    +--------------------------------------+
+    MainPanel (top-level QWidget, transparent background, frameless)
+      outer QVBoxLayout(margins = Shadow.PANEL_MARGIN on all sides)
+        └── _PanelChrome (QFrame, visible rounded slab, drop-shadowed)
+             inner QVBoxLayout
+               ├── _DraggableTitleBar  ← grab here to move the window
+               │     ├── "HeyBuddy" label
+               │     ├── stretch
+               │     ├── ⚙ Settings button
+               │     └── ✕ Hide button
+               ├── State chip (Idle / Listening / ...)
+               ├── Error banner (initially hidden)
+               ├── Chat scrollback (user / assistant bubbles)
+               ├── Composer (input + Send)
+               └── "Hold CTRL+ALT to talk" hint
+
+Why the outer/chrome split: Qt's `QGraphicsDropShadowEffect` paints into
+the widget's own bounding rect. If we applied it to MainPanel directly,
+the blur would be clipped at the window edge. The outer layout reserves
+`theme.Shadow.PANEL_MARGIN` pixels of transparent slack so the shadow
+has somewhere to render.
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSlot
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import QPoint, QRect, Qt, QTimer, pyqtSlot
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QMouseEvent,
+    QMoveEvent,
+    QShowEvent,
+)
 from PyQt6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -31,35 +49,121 @@ from PyQt6.QtWidgets import (
 from ..core.companion_manager import CompanionManager, CompanionState
 from ..models.config import AppConfig
 from ..models.message import Message, Role
+from ..utils.logger import get_logger
+from . import theme
 from .settings_panel import SettingsPanel
 
-_STATE_LABELS = {
-    CompanionState.IDLE: ("Idle", "#2b8a3e"),
-    CompanionState.LISTENING: ("Listening...", "#1971c2"),
-    CompanionState.PROCESSING: ("Processing...", "#9c36b5"),
-    CompanionState.RESPONDING: ("Responding...", "#0c8599"),
-    CompanionState.ERROR: ("Error", "#c92a2a"),
+log = get_logger(__name__)
+
+# Mapping from manager state to the chip label + the theme token for its
+# background color. Sourced from `theme.Color` so future re-skinning is a
+# one-file change.
+_STATE_LABELS: dict[CompanionState, tuple[str, str]] = {
+    CompanionState.IDLE: ("Idle", theme.Color.STATE_IDLE),
+    CompanionState.LISTENING: ("Listening...", theme.Color.STATE_LISTENING),
+    CompanionState.PROCESSING: ("Processing...", theme.Color.STATE_PROCESSING),
+    CompanionState.RESPONDING: ("Responding...", theme.Color.STATE_RESPONDING),
+    CompanionState.ERROR: ("Error", theme.Color.STATE_ERROR),
 }
 
 
+class _DraggableTitleBar(QWidget):
+    """Custom title bar — clicking and dragging moves the parent panel.
+
+    Frameless windows don't get title-bar dragging from Qt. We implement it
+    here by capturing the mouse on press, computing the offset between the
+    click point and the panel's top-left, and translating the panel during
+    the drag.
+
+    The drag cursor changes to `SizeAllCursor` on hover so the affordance
+    is obvious without a visible chrome.
+    """
+
+    def __init__(self, panel_to_move: QWidget, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._panel_to_move = panel_to_move
+        # Offset from the panel's top-left to the global cursor position at
+        # mouse-down. We subtract this from each subsequent global cursor
+        # position to compute where the panel should move.
+        self._drag_grab_offset: QPoint | None = None
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            global_pos = event.globalPosition().toPoint()
+            self._drag_grab_offset = global_pos - self._panel_to_move.pos()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        if (
+            self._drag_grab_offset is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            global_pos = event.globalPosition().toPoint()
+            self._panel_to_move.move(global_pos - self._drag_grab_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        self._drag_grab_offset = None
+        event.accept()
+
+
 class MainPanel(QWidget):
+    """The floating tray-launched window.
+
+    Public attributes worth knowing about from outside:
+
+    * `hotkey_monitor` — set by `main.py` after construction so the
+      Settings dialog can rebind the chord without restart.
+    """
+
+    # How long after the last move() to persist the new position. Avoids
+    # writing settings.json on every pixel of drag.
+    _POSITION_SAVE_DEBOUNCE_MS = 400
+
     def __init__(self, config: AppConfig, manager: CompanionManager) -> None:
         super().__init__(
             None,
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
-            | (Qt.WindowType.WindowStaysOnTopHint if config.ui.always_on_top else Qt.WindowType.Widget),
+            | (
+                Qt.WindowType.WindowStaysOnTopHint
+                if config.ui.always_on_top
+                else Qt.WindowType.Widget
+            ),
         )
+        # Critical for the drop shadow: we draw the visible chrome inside an
+        # inner QFrame and leave the outer widget transparent so the blur
+        # bleeds through the margin instead of being clipped.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
         self.config = config
         self.manager = manager
-        # Wired by main.py so the Settings dialog can rebind without restart.
-        self.hotkey_monitor = None
+        self.hotkey_monitor = None  # wired by main.py post-construction
 
-        self.resize(config.ui.panel_width, config.ui.panel_height)
+        # Include the shadow margin in the overall window size so the
+        # visible chrome stays the configured panel_width / panel_height.
+        margin_total = theme.Shadow.PANEL_MARGIN * 2
+        self.resize(
+            config.ui.panel_width + margin_total,
+            config.ui.panel_height + margin_total,
+        )
         self.setObjectName("MainPanel")
         self._apply_theme(config.ui.theme)
         self._build_ui()
         self._wire_signals()
+
+        # Debounce timer for moveEvent → persist position.
+        self._position_save_timer = QTimer(self)
+        self._position_save_timer.setSingleShot(True)
+        self._position_save_timer.timeout.connect(self._persist_position_now)
+        # Suppressed until the first showEvent so the initial restore-position
+        # move() doesn't immediately overwrite the saved coords.
+        self._position_save_armed = False
 
         # Auto-clear timer for the error banner so stale errors don't sit
         # there forever during normal turn cycling.
@@ -69,14 +173,46 @@ class MainPanel(QWidget):
 
     # ---- layout ----
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(14, 12, 14, 12)
-        root.setSpacing(10)
+        # Outer transparent layout — reserves shadow margin only.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(
+            theme.Shadow.PANEL_MARGIN,
+            theme.Shadow.PANEL_MARGIN,
+            theme.Shadow.PANEL_MARGIN,
+            theme.Shadow.PANEL_MARGIN,
+        )
+        outer.setSpacing(0)
 
-        # Title bar
-        title_row = QHBoxLayout()
+        # Inner chrome — the rounded, opaque slab that carries the shadow.
+        self.chrome = QFrame(self)
+        self.chrome.setObjectName("PanelChrome")
+        drop_shadow = QGraphicsDropShadowEffect(self.chrome)
+        drop_shadow.setBlurRadius(theme.Shadow.PANEL_BLUR_RADIUS)
+        drop_shadow.setOffset(0, theme.Shadow.PANEL_OFFSET_Y)
+        drop_shadow.setColor(QColor(0, 0, 0, theme.Shadow.PANEL_COLOR_ALPHA))
+        self.chrome.setGraphicsEffect(drop_shadow)
+        outer.addWidget(self.chrome)
+
+        root = QVBoxLayout(self.chrome)
+        root.setContentsMargins(
+            theme.Spacing.LG,
+            theme.Spacing.LG,
+            theme.Spacing.LG,
+            theme.Spacing.LG,
+        )
+        root.setSpacing(theme.Spacing.MD)
+
+        # ---- title bar (draggable) ----
+        title_bar = _DraggableTitleBar(panel_to_move=self, parent=self.chrome)
+        title_bar_layout = QHBoxLayout(title_bar)
+        title_bar_layout.setContentsMargins(0, 0, 0, 0)
+
         title = QLabel("HeyBuddy")
-        title_font = QFont("Segoe UI", 14, QFont.Weight.DemiBold)
+        title_font = QFont(
+            theme.Typography.FONT_FAMILY_UI,
+            theme.Typography.SIZE_TITLE,
+            theme.Typography.WEIGHT_DEMI,
+        )
         title.setFont(title_font)
 
         self.settings_btn = QPushButton("⚙")
@@ -89,13 +225,13 @@ class MainPanel(QWidget):
         self.close_btn.setToolTip("Hide panel")
         self.close_btn.clicked.connect(self.hide)
 
-        title_row.addWidget(title)
-        title_row.addStretch(1)
-        title_row.addWidget(self.settings_btn)
-        title_row.addWidget(self.close_btn)
-        root.addLayout(title_row)
+        title_bar_layout.addWidget(title)
+        title_bar_layout.addStretch(1)
+        title_bar_layout.addWidget(self.settings_btn)
+        title_bar_layout.addWidget(self.close_btn)
+        root.addWidget(title_bar)
 
-        # State chip
+        # ---- state chip ----
         self.state_chip = QLabel("Idle")
         self.state_chip.setObjectName("stateChip")
         self.state_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -103,18 +239,18 @@ class MainPanel(QWidget):
         self._set_state_chip(CompanionState.IDLE)
         root.addWidget(self.state_chip)
 
-        # Error banner (initially hidden; revealed by _show_error)
+        # ---- error banner ----
         self.error_banner = QLabel("")
         self.error_banner.setObjectName("errorBanner")
         self.error_banner.setWordWrap(True)
         self.error_banner.setVisible(False)
         root.addWidget(self.error_banner)
 
-        # Chat scrollback
+        # ---- chat scrollback ----
         self.chat_container = QWidget()
         self.chat_layout = QVBoxLayout(self.chat_container)
         self.chat_layout.setContentsMargins(0, 0, 0, 0)
-        self.chat_layout.setSpacing(8)
+        self.chat_layout.setSpacing(theme.Spacing.MD)
         self.chat_layout.addStretch(1)
 
         self.scroll = QScrollArea()
@@ -123,10 +259,12 @@ class MainPanel(QWidget):
         self.scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         root.addWidget(self.scroll, 1)
 
-        # Composer
+        # ---- composer ----
         composer = QHBoxLayout()
         self.input = QLineEdit()
-        self.input.setPlaceholderText("Type a message, or hold Ctrl+Alt to talk...")
+        self.input.setPlaceholderText(
+            f"Type a message, or hold {self.config.hotkey.upper()} to talk..."
+        )
         self.input.returnPressed.connect(self._send_typed)
         self.send_btn = QPushButton("Send")
         self.send_btn.clicked.connect(self._send_typed)
@@ -139,37 +277,54 @@ class MainPanel(QWidget):
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(hint)
 
-    def _apply_theme(self, theme: str) -> None:
-        if theme == "dark":
+    def _apply_theme(self, theme_name: str) -> None:
+        """Apply the dark stylesheet using `theme.py` tokens.
+
+        Cycle 2 scope: only the panel/chrome chrome rule consumes theme
+        tokens — that's what this cycle's task ("rounded corners") calls
+        for. The other rules (buttons, bubbles, etc.) keep their existing
+        hex literals; later cycles ("Hover states + pointer cursor on all
+        buttons" etc.) migrate them.
+        """
+        if theme_name == "dark":
             self.setStyleSheet(
-                """
-                #MainPanel { background-color: #1a1d24; border: 1px solid #2d3340;
-                             border-radius: 12px; color: #e6e8eb; }
-                QLabel { color: #e6e8eb; }
-                QLabel#hint { color: #8a93a3; font-size: 11px; }
-                QLineEdit { background:#0f1218; border:1px solid #2d3340;
-                            border-radius:6px; padding:6px 8px; color:#e6e8eb; }
-                QPushButton { background:#2e90fa; border:none; border-radius:6px;
-                              padding:6px 12px; color:white; font-weight:600; }
-                QPushButton:hover { background:#1f7ad8; }
-                QLabel#stateChip { border-radius: 12px; padding: 2px 12px;
-                                   color:white; font-weight:600; }
-                QLabel.userBubble { background:#2e3a4f; padding:8px 10px;
-                                    border-radius:10px; }
-                QLabel.assistantBubble { background:#0f3a52; padding:8px 10px;
-                                         border-radius:10px; }
-                QLabel#errorBanner { background:#3a1f24; color:#ffb1b1;
+                f"""
+                #MainPanel {{ background-color: transparent; }}
+                #PanelChrome {{
+                    background-color: {theme.Color.BG_PANEL};
+                    border: 1px solid {theme.Color.BG_BORDER};
+                    border-radius: {theme.Radius.PANEL}px;
+                    color: {theme.Color.TEXT_PRIMARY};
+                }}
+                QLabel {{ color: {theme.Color.TEXT_PRIMARY}; }}
+                QLabel#hint {{ color: {theme.Color.TEXT_DIM}; font-size: 11px; }}
+                QLineEdit {{ background:#0f1218; border:1px solid #2d3340;
+                            border-radius:6px; padding:6px 8px; color:#e6e8eb; }}
+                QPushButton {{ background:#2e90fa; border:none; border-radius:6px;
+                              padding:6px 12px; color:white; font-weight:600; }}
+                QPushButton:hover {{ background:#1f7ad8; }}
+                QLabel#stateChip {{ border-radius: 12px; padding: 2px 12px;
+                                   color:white; font-weight:600; }}
+                QLabel.userBubble {{ background:#2e3a4f; padding:8px 10px;
+                                    border-radius:10px; }}
+                QLabel.assistantBubble {{ background:#0f3a52; padding:8px 10px;
+                                         border-radius:10px; }}
+                QLabel#errorBanner {{ background:#3a1f24; color:#ffb1b1;
                                      border:1px solid #5a2a30; border-radius:8px;
-                                     padding:6px 10px; }
+                                     padding:6px 10px; }}
                 """
             )
         else:
             self.setStyleSheet(
-                """
-                #MainPanel { background-color: #ffffff; border: 1px solid #d0d4dc;
-                             border-radius: 12px; }
-                QLabel#stateChip { border-radius: 12px; padding: 2px 12px;
-                                   color:white; font-weight:600; }
+                f"""
+                #MainPanel {{ background-color: transparent; }}
+                #PanelChrome {{
+                    background-color: #ffffff;
+                    border: 1px solid #d0d4dc;
+                    border-radius: {theme.Radius.PANEL}px;
+                }}
+                QLabel#stateChip {{ border-radius: 12px; padding: 2px 12px;
+                                   color:white; font-weight:600; }}
                 """
             )
 
@@ -196,7 +351,9 @@ class MainPanel(QWidget):
         label, color = _STATE_LABELS.get(state, ("...", "#5c5f66"))
         self.state_chip.setText(label)
         self.state_chip.setStyleSheet(
-            f"background-color: {color}; border-radius: 12px; color: white;"
+            f"background-color: {color}; "
+            f"border-radius: {theme.Radius.PILL}px; "
+            f"color: {theme.Color.TEXT_INVERTED}; "
             f"padding: 2px 12px; font-weight: 600;"
         )
         # Clear stale errors as soon as the manager moves out of ERROR.
@@ -249,7 +406,9 @@ class MainPanel(QWidget):
         if not text:
             return
         self.input.clear()
-        self.manager.send_text(text, include_screenshot=self.config.screen_capture_enabled)
+        self.manager.send_text(
+            text, include_screenshot=self.config.screen_capture_enabled,
+        )
 
     @pyqtSlot()
     def open_settings(self) -> None:
@@ -266,3 +425,55 @@ class MainPanel(QWidget):
             self.show()
             self.raise_()
             self.activateWindow()
+
+    # ---- position persistence ----
+    def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
+        """Restore the saved position the first time the window is shown.
+
+        We can't do this in __init__ because the window has no native handle
+        yet and `move()` calls would be ignored on some Windows builds.
+        """
+        super().showEvent(event)
+        if not self._position_save_armed:
+            self._restore_position()
+            # Arm AFTER the restore so the move() above doesn't trigger a
+            # save with stale data.
+            self._position_save_armed = True
+
+    def moveEvent(self, event: QMoveEvent) -> None:  # type: ignore[override]
+        """Debounce position saves during a drag."""
+        super().moveEvent(event)
+        if self._position_save_armed:
+            self._position_save_timer.start(self._POSITION_SAVE_DEBOUNCE_MS)
+
+    def _restore_position(self) -> None:
+        """Move the panel to its last known position, if valid."""
+        x = self.config.ui.panel_x
+        y = self.config.ui.panel_y
+        if x is None or y is None:
+            return  # never saved — let Qt place the window
+        # Validate: a monitor that held the panel may be disconnected now,
+        # leaving the panel offscreen. Require the saved rect to intersect
+        # the live virtual desktop before honoring it.
+        primary_screen = QApplication.primaryScreen()
+        if primary_screen is None:
+            return
+        virtual_desktop = primary_screen.virtualGeometry()
+        saved_rect = QRect(x, y, self.width(), self.height())
+        if not virtual_desktop.intersects(saved_rect):
+            log.info(
+                "Saved panel position (%d, %d) is offscreen on the current "
+                "monitor layout — falling back to default placement.", x, y,
+            )
+            return
+        self.move(x, y)
+
+    def _persist_position_now(self) -> None:
+        """Write the current position to config. Called by the debounce timer."""
+        pos = self.pos()
+        self.config.ui.panel_x = pos.x()
+        self.config.ui.panel_y = pos.y()
+        try:
+            self.config.save()
+        except Exception:
+            log.exception("Failed to persist panel position to config")

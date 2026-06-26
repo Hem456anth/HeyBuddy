@@ -119,6 +119,31 @@ class Spacing:
     XXL = 24       # generous separation between unrelated areas
 
 
+class Shadow:
+    """Drop-shadow tokens for elevated surfaces (frameless panel, dialogs).
+
+    On Windows, a frameless `QWidget` doesn't inherit the OS drop shadow that
+    native title-bar windows get for free, so we paint our own via
+    `QGraphicsDropShadowEffect`. The effect needs three things:
+
+    * `BLUR_RADIUS` — softness of the shadow halo
+    * `OFFSET_Y`    — vertical drop distance (a small positive value reads as
+                      "this window sits above its background")
+    * `COLOR_ALPHA` — opacity of the (always-black) shadow, 0-255
+
+    Plus we need the outer layout to reserve `MARGIN` pixels around the
+    visible chrome so the shadow has somewhere to render. That margin is
+    listed here (not under `Spacing`) because its size is dictated by the
+    blur radius, not by general layout density.
+    """
+
+    # Panel-level shadow.
+    PANEL_BLUR_RADIUS = 24
+    PANEL_OFFSET_Y = 4
+    PANEL_COLOR_ALPHA = 140
+    PANEL_MARGIN = 16          # outer-layout margin so the blur isn't clipped
+
+
 class Typography:
     """Font-family and font-size tokens.
 

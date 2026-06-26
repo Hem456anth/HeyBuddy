@@ -27,6 +27,13 @@ class UIConfig:
     panel_height: int = 560
     always_on_top: bool = True
     theme: str = "dark"
+    # Last known panel position in physical desktop pixels. `None` means
+    # "no saved position — center on the primary monitor". The MainPanel
+    # writes these (debounced) whenever the user drags the window and
+    # validates them against the live virtual-screen rect on launch so a
+    # disconnected monitor doesn't trap the panel offscreen.
+    panel_x: int | None = None
+    panel_y: int | None = None
 
 
 @dataclass
