@@ -180,6 +180,7 @@ heybuddy/
 │   ├── main.py                            ← PyQt bootstrap + pystray + hotkey wiring
 │   │
 │   ├── ui/
+│   │   ├── theme.py                       ← design tokens (color, radius, spacing, typography) — single source of truth, no hardcoded values elsewhere
 │   │   ├── main_window.py                 ← floating panel (frameless QWidget, dark theme)
 │   │   ├── overlay_window.py              ← click-through blue cursor overlay
 │   │   └── settings_panel.py              ← settings dialog (Phase 3 expands this)
@@ -243,6 +244,10 @@ These mirror upstream `AGENTS.md` adapted for Python.
   consistent. No native chrome.
 - The overlay window is never activated and never accepts input.
 - All buttons set a pointer cursor on hover.
+- **All colors, corner radii, and spacing values come from
+  [`src/ui/theme.py`](src/ui/theme.py)**. No hardcoded `#hexcolor`,
+  `border-radius: 8px`, or `padding: 12px` anywhere else in the UI. If
+  you need a token that doesn't exist there, add it to theme.py first.
 
 ### Do NOT
 
