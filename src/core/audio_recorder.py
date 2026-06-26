@@ -28,6 +28,16 @@ log = get_logger(__name__)
 # websocket sender is fine; a synchronous HTTP call is not.
 PcmChunkCallback = Callable[[bytes], None]
 
+# Type alias for the per-block level callback. Receives the block's normalized
+# RMS (0.0 .. 1.0). Called on the same audio thread as PcmChunkCallback, so
+# the same non-blocking constraint applies. Wiring an emit-only Qt signal is
+# the intended use: the signal queues to the UI thread for free.
+AudioLevelCallback = Callable[[float], None]
+
+# PCM16 max amplitude per sample. Used to normalize the RMS into [0, 1] for
+# the meter widget; lifted out so the magic number has a name.
+_PCM16_MAX_AMPLITUDE = 32_768.0
+
 
 class AudioRecorder:
     """Threaded mic recorder. Idempotent start; cancel discards the buffer.
@@ -56,6 +66,7 @@ class AudioRecorder:
         self._lock = threading.Lock()
         self._recording = False
         self._on_chunk: PcmChunkCallback | None = None
+        self._on_level: AudioLevelCallback | None = None
 
     def set_chunk_listener(self, on_chunk: PcmChunkCallback | None) -> None:
         """Register (or clear) a per-block PCM callback.
@@ -66,6 +77,17 @@ class AudioRecorder:
         """
         with self._lock:
             self._on_chunk = on_chunk
+
+    def set_level_listener(self, on_level: AudioLevelCallback | None) -> None:
+        """Register (or clear) a per-block audio-level callback.
+
+        Independent of `set_chunk_listener` — the level meter widget
+        wants RMS even when STT isn't wired (e.g. transient cursor mode
+        without panel open), and the streaming pipeline wants PCM even
+        when no meter is visible. The two slots stay decoupled.
+        """
+        with self._lock:
+            self._on_level = on_level
 
     @property
     def is_recording(self) -> bool:
@@ -131,16 +153,30 @@ class AudioRecorder:
         # us little-endian PCM16 which is exactly what AssemblyAI wants.
         chunk = bytes(indata)
         self._frames.append(chunk)
-        # Snapshot the callback reference without holding the lock for the
-        # whole callback duration — set_chunk_listener can replace it any time.
-        listener = self._on_chunk
-        if listener is not None:
+        # Snapshot the callback references without holding the lock for the
+        # whole callback duration — set_*_listener can replace them any time.
+        chunk_listener = self._on_chunk
+        level_listener = self._on_level
+        if chunk_listener is not None:
             try:
-                listener(chunk)
+                chunk_listener(chunk)
             except Exception:
                 # Never let a listener crash take down the audio thread; that
                 # would silently stop recording for the rest of the session.
                 log.exception("on_chunk listener raised")
+        if level_listener is not None:
+            try:
+                # Compute RMS over the block, then normalize to [0, 1] by
+                # dividing by the PCM16 max amplitude. Cast to float32 first
+                # because squaring int16 values overflows silently in numpy.
+                samples_f32 = indata.astype(np.float32, copy=False)
+                mean_square = float(np.mean(samples_f32 * samples_f32))
+                rms_normalized = (mean_square ** 0.5) / _PCM16_MAX_AMPLITUDE
+                # Speech is rarely close to full-scale; clip to 1.0 for
+                # safety but a real signal almost never gets there.
+                level_listener(min(1.0, rms_normalized))
+            except Exception:
+                log.exception("on_level listener raised")
 
     # ----- helpers -----
     def _teardown_stream(self) -> None:

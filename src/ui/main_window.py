@@ -25,6 +25,8 @@ has somewhere to render.
 """
 from __future__ import annotations
 
+from collections import deque
+
 from PyQt6.QtCore import (
     QEasingCurve,
     QPoint,
@@ -256,6 +258,78 @@ class _StatusRow(QWidget):
         )
 
 
+class _WaveformMeter(QWidget):
+    """Horizontal sparkline of recent mic RMS samples.
+
+    Consumes `CompanionManager.audio_level_changed` (float in [0, 1]). Each
+    sample appends to a fixed-length deque; the right edge is the newest
+    sample, the left edge is the oldest. Older samples scroll off the left
+    as new ones arrive — the visual matches what a tape-based VU meter
+    feels like.
+
+    Per the upgrade rule, this widget is only shown while the manager is in
+    `LISTENING`. `MainPanel._set_state_chip` toggles visibility on every
+    state transition so the meter doesn't take vertical space when idle.
+    """
+
+    SAMPLE_COUNT = 60          # ~4 seconds of history at the default block rate
+    BAR_WIDTH_PX = 3
+    BAR_GAP_PX = 2
+    # Reserve a floor so a perfectly silent block still draws a hairline,
+    # which makes "the meter is alive, just hearing nothing" obvious.
+    MIN_BAR_HEIGHT_PX = 2
+    # A soft visual amplification so quiet speech is visible without the
+    # user needing to shout. Capped at 1.0 in add_sample for safety.
+    LEVEL_AMPLIFICATION = 3.0
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._samples: deque[float] = deque(
+            [0.0] * self.SAMPLE_COUNT, maxlen=self.SAMPLE_COUNT,
+        )
+        # Lock the widget to the exact width of N bars + gaps so the meter
+        # never re-flows mid-recording.
+        total_width = (
+            self.SAMPLE_COUNT * self.BAR_WIDTH_PX
+            + (self.SAMPLE_COUNT - 1) * self.BAR_GAP_PX
+        )
+        self.setMinimumWidth(total_width)
+        # Height balanced against the status-row height so the two read as
+        # a coherent block when both are visible.
+        self.setFixedHeight(int(theme.Radius.STATUS_DOT * 4))
+        self.setVisible(False)
+
+    @pyqtSlot(float)
+    def add_sample(self, level_0_to_1: float) -> None:
+        """Append one normalized RMS sample and request a repaint."""
+        amplified = level_0_to_1 * self.LEVEL_AMPLIFICATION
+        self._samples.append(max(0.0, min(1.0, amplified)))
+        self.update()
+
+    def reset(self) -> None:
+        """Wipe the history. Called when LISTENING begins so the meter
+        doesn't show stale samples from the previous turn."""
+        self._samples.clear()
+        self._samples.extend([0.0] * self.SAMPLE_COUNT)
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(theme.Color.METER_BAR))
+
+        available_height = self.height()
+        bar_step = self.BAR_WIDTH_PX + self.BAR_GAP_PX
+        for index, level in enumerate(self._samples):
+            x = index * bar_step
+            bar_height = max(
+                self.MIN_BAR_HEIGHT_PX, int(level * available_height),
+            )
+            y = available_height - bar_height
+            painter.drawRect(x, y, self.BAR_WIDTH_PX, bar_height)
+
+
 class MainPanel(QWidget):
     """The floating tray-launched window.
 
@@ -388,6 +462,10 @@ class MainPanel(QWidget):
         self._set_state_chip(CompanionState.IDLE)
         root.addWidget(self.status_row)
 
+        # ---- mic level waveform meter (visible only during LISTENING) ----
+        self.waveform_meter = _WaveformMeter(self.chrome)
+        root.addWidget(self.waveform_meter)
+
         # ---- error banner ----
         self.error_banner = QLabel("")
         self.error_banner.setObjectName("errorBanner")
@@ -505,6 +583,11 @@ class MainPanel(QWidget):
                 f"Type a message, or hold {self.config.hotkey.upper()} to talk..."
             )
         )
+        # Mic level → waveform meter. The signal is emitted from the audio
+        # thread; Qt's default connection picks AutoConnection which
+        # marshals to the UI thread because emitter and receiver have
+        # different thread affinity.
+        self.manager.audio_level_changed.connect(self.waveform_meter.add_sample)
 
     # ---- slots ----
     def _set_state_chip(self, state: CompanionState) -> None:
@@ -522,6 +605,17 @@ class MainPanel(QWidget):
         banner = getattr(self, "error_banner", None)
         if state != CompanionState.ERROR and banner is not None and banner.isVisible():
             self._clear_error_banner()
+        # Waveform meter is visible only during LISTENING. Resetting on
+        # entry wipes the previous turn's tail; hiding outside LISTENING
+        # collapses the row so the panel doesn't reserve dead space.
+        # `getattr` for the same initial-call-during-build reason.
+        meter = getattr(self, "waveform_meter", None)
+        if meter is not None:
+            if state == CompanionState.LISTENING:
+                meter.reset()
+                meter.setVisible(True)
+            elif meter.isVisible():
+                meter.setVisible(False)
         # Transient cursor mode: collapse the panel as soon as we start
         # listening; reappearance is manual (tray click) so the user has
         # explicit control over when the panel comes back.

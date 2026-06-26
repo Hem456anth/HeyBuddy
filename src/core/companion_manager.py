@@ -66,6 +66,10 @@ class CompanionManager(QObject):
     transcription_final = pyqtSignal(str)         # final STT text
     point_received = pyqtSignal(object)           # PointMarker
     error_occurred = pyqtSignal(str)
+    # Per-block mic RMS (0.0..1.0) while LISTENING. Emitted from the audio
+    # thread; Qt's queued-connection mechanism marshals it to the UI thread
+    # for the waveform meter widget. No signal is emitted outside LISTENING.
+    audio_level_changed = pyqtSignal(float)
 
     # Recordings dropped here so operators can sanity-check Phase 1+2 audio.
     RECORDINGS_DIR = PROJECT_ROOT / "recordings"
@@ -195,6 +199,9 @@ class CompanionManager(QObject):
         self._active_stt_session = session
         # Push every captured block straight into the websocket.
         self.recorder.set_chunk_listener(session.feed_pcm)
+        # Also drive the panel's waveform meter from the same audio thread.
+        # The signal emit hop marshals onto the UI thread for free.
+        self.recorder.set_level_listener(self.audio_level_changed.emit)
         try:
             self.recorder.start()
         except Exception as recorder_error:
@@ -202,6 +209,7 @@ class CompanionManager(QObject):
             session.stop(final_wait_seconds=0.1)
             self._active_stt_session = None
             self.recorder.set_chunk_listener(None)
+            self.recorder.set_level_listener(None)
             self._fail(f"Microphone error: {recorder_error}")
 
     def _process_turn(self) -> None:
@@ -212,6 +220,7 @@ class CompanionManager(QObject):
         """
         pcm_bytes = self.recorder.stop()
         self.recorder.set_chunk_listener(None)
+        self.recorder.set_level_listener(None)
         session = self._active_stt_session
         self._active_stt_session = None
         final_transcript = ""
@@ -340,6 +349,7 @@ class CompanionManager(QObject):
         # Tear down any in-flight side resources so the user can retry cleanly.
         self.recorder.cancel()
         self.recorder.set_chunk_listener(None)
+        self.recorder.set_level_listener(None)
         session = self._active_stt_session
         self._active_stt_session = None
         if session is not None:

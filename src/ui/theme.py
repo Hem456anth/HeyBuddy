@@ -92,6 +92,12 @@ class Color:
     OVERLAY_LABEL_BG = "#141e30"       # RGBA-friendly via stylesheet
     OVERLAY_LABEL_BG_ALPHA = 220       # 0-255; consumers compose this in
 
+    # ----- waveform meter -----
+    # Live mic-level sparkline shown only while the panel state is LISTENING.
+    # Separate token so re-tinting the meter doesn't accidentally move the
+    # accent color used by buttons and the overlay.
+    METER_BAR = "#2e90fa"
+
 
 class Radius:
     """Corner-radius tokens in pixels."""

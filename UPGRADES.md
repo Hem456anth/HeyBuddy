@@ -10,7 +10,7 @@ commit updates `CLAUDE.md`.
 - [x] Frameless panel: rounded corners, shadow, draggable, remembers position
 - [x] DWM blur-behind translucent background
 - [x] Status row bound to state (dot + label + pulse)
-- [ ] Mic level waveform meter while listening
+- [x] Mic level waveform meter while listening
 - [ ] Streaming reply area fills token-by-token
 - [ ] Hover states + pointer cursor on all buttons
 - [ ] Panel non-activating (WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW)
