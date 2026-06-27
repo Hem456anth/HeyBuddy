@@ -68,12 +68,17 @@ class AppConfig:
     # Persisted purely so the Settings panel can show the right checkbox
     # state; actual autostart state is the registry, set via utils.win32.
     autostart_enabled: bool = False
+    # Informational-only ElevenLabs voice ID. The LIVE voice is whatever
+    # the Cloudflare Worker has set as `ELEVENLABS_VOICE_ID` (see
+    # worker/wrangler.toml). The client does NOT send this value in
+    # /tts requests — the Worker's `handleTTS` ignores any extra body
+    # keys and always uses its env var. This field is here so the
+    # Settings panel can display what the user *intends* to deploy,
+    # for record-keeping; changing it does NOT change the actual voice.
+    voice_id: str = ""
     audio: AudioConfig = field(default_factory=AudioConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
-    # NOTE: there is no `voice_id` here. The Worker injects
-    # ELEVENLABS_VOICE_ID into outbound /tts requests; the client cannot
-    # override it. See `CLAUDE.md` Worker contract.
 
     # ----- I/O helpers -----
     @classmethod
@@ -106,6 +111,7 @@ class AppConfig:
             screen_capture_enabled=raw.get("screen_capture_enabled", True),
             transient_cursor_mode=raw.get("transient_cursor_mode", False),
             autostart_enabled=raw.get("autostart_enabled", False),
+            voice_id=raw.get("voice_id", cls.voice_id),
             audio=AudioConfig(**audio_raw),
             ui=UIConfig(**ui_raw),
             transcription=TranscriptionConfig(**tr_raw),

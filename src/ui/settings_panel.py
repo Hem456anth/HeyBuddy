@@ -253,6 +253,25 @@ class SettingsPanel(QDialog):
             self.model.setCurrentText(config.model)
         form.addRow("Model", self.model)
 
+        # ---- Voice ID (informational only) ----
+        # The LIVE voice is whatever the Cloudflare Worker has set as
+        # ELEVENLABS_VOICE_ID. The client cannot override it without
+        # changing the Worker contract, which the loop discipline
+        # forbids. This field exists so the user can keep a record of
+        # which voice they configured server-side; editing it here
+        # changes settings.json but does NOT change what HeyBuddy
+        # speaks with.
+        self.voice_id = QLineEdit(config.voice_id)
+        self.voice_id.setPlaceholderText("e.g. 21m00Tcm4TlvDq8ikWAM (Rachel)")
+        self.voice_id.setToolTip(
+            "Informational only. The live voice is set on the Cloudflare "
+            "Worker via the ELEVENLABS_VOICE_ID env var (see worker/"
+            "wrangler.toml). Editing this field updates settings.json "
+            "for your records but does NOT change the voice the Worker "
+            "speaks with — for that, redeploy the Worker."
+        )
+        form.addRow("Voice ID (Worker-managed)", self.voice_id)
+
         # ---- Behavior toggles ----
         self.tts_enabled = QCheckBox("Speak responses with ElevenLabs")
         self.tts_enabled.setChecked(config.tts_enabled)
@@ -379,6 +398,7 @@ class SettingsPanel(QDialog):
     def _save(self) -> None:
         self.config.worker_url = self.worker_url.text().strip()
         self.config.model = self.model.currentText().strip()
+        self.config.voice_id = self.voice_id.text().strip()
         new_hotkey = self.hotkey.currentData() or "ctrl+alt"
         hotkey_changed = new_hotkey != self.config.hotkey
         self.config.hotkey = new_hotkey
