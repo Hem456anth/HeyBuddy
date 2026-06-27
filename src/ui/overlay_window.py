@@ -54,6 +54,18 @@ class CursorOverlay(QWidget):
     HOLD_AT_TARGET_MS = 2_200             # pulse time before dismiss / next
     INTER_POINT_GAP_MS = 250              # breathing room between queued points
 
+    # ---- comet trail tuning ----
+    # Length of the trail in samples. At 60fps a 12-sample trail covers
+    # ~200ms of motion, which reads as a clear smear without obscuring
+    # half the screen on long flights.
+    TRAIL_LENGTH = 12
+    # The smallest trail blob is this fraction of the dot's radius. Larger
+    # values make the trail blockier; smaller values make it pin-thin.
+    TRAIL_MIN_RADIUS_RATIO = 0.35
+    # Alpha of the trail blob closest to the dot. The oldest blob fades to
+    # zero linearly from this value.
+    TRAIL_HEAD_ALPHA = 130
+
     def __init__(self) -> None:
         super().__init__(
             None,
@@ -77,6 +89,11 @@ class CursorOverlay(QWidget):
         self._flight_control_widget: QPoint | None = None
         self._current_label: str = ""
         self._pulse_radius: float = self.PULSE_BASE_RADIUS
+        # Comet trail — bounded ring buffer of recent dot positions in
+        # widget-local coords. Appended to while the flight animation is
+        # running; cleared on flight-finished and on dismiss so the at-rest
+        # pulse stays visually clean.
+        self._trail_points: deque[QPoint] = deque(maxlen=self.TRAIL_LENGTH)
 
         # ---- queue ----
         self._marker_queue: deque[PointMarker] = deque()
@@ -179,6 +196,7 @@ class CursorOverlay(QWidget):
         self._flight_end_widget = None
         self._flight_control_widget = None
         self._current_label = ""
+        self._trail_points.clear()
         self.hide()
 
     # ---- queue driver ----
@@ -228,6 +246,9 @@ class CursorOverlay(QWidget):
         )
         self._current_label = marker.label
         self._busy = True
+        # Fresh trail for this flight — leftover points from a prior flight
+        # would smear visually across the cut.
+        self._trail_points.clear()
 
         # Show window, raise, then run the animation. The ex-style re-apply
         # happens automatically inside `showEvent` (centralized in cycle 9 so
@@ -245,6 +266,9 @@ class CursorOverlay(QWidget):
     def _on_flight_finished(self) -> None:
         # Park at the destination and pulse for HOLD_AT_TARGET_MS, then either
         # advance to the next queued point or dismiss the overlay.
+        # Drop the comet trail here so the at-rest pulse stays clean — the
+        # tail reads as "still in motion" and would compete with the pulse.
+        self._trail_points.clear()
         self._pulse_animation.start()
         self._dismiss_or_next_timer.start(
             self.HOLD_AT_TARGET_MS + self.INTER_POINT_GAP_MS,
@@ -258,6 +282,7 @@ class CursorOverlay(QWidget):
         self._flight_end_widget = None
         self._flight_control_widget = None
         self._current_label = ""
+        self._trail_points.clear()
         self.hide()
 
     # ---- bezier math ----
@@ -316,14 +341,43 @@ class CursorOverlay(QWidget):
             self._flight_end_widget,
             self._flight_progress,
         )
+
+        # Only sample the comet trail while the flight animation is
+        # actually running. The pulse animation also triggers paint events
+        # at rest, and appending the same position 60x/sec would fill the
+        # deque with a stack of identical points (no visible trail).
+        if self._flight_animation.state() == QPropertyAnimation.State.Running:
+            self._trail_points.append(current)
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        # Comet trail — drawn FIRST so the halo and solid dot paint on
+        # top. Iterate oldest-to-newest so the alpha+radius lerp matches
+        # deque order (index 0 = faintest tip, index N-1 = brightest blob
+        # right behind the dot).
+        trail_len = len(self._trail_points)
+        if trail_len > 0:
+            for index, trail_point in enumerate(self._trail_points):
+                # `fade` in (0, 1]: 0 = oldest (faintest), 1 = newest.
+                # Divide by max(1, trail_len) so a single-point trail
+                # still draws something rather than zeroing out.
+                fade = (index + 1) / max(1, trail_len)
+                radius = self._pulse_radius * (
+                    self.TRAIL_MIN_RADIUS_RATIO
+                    + fade * (1.0 - self.TRAIL_MIN_RADIUS_RATIO)
+                )
+                alpha = int(self.TRAIL_HEAD_ALPHA * fade)
+                trail_color = QColor(self.PULSE_COLOR)
+                trail_color.setAlpha(alpha)
+                painter.setBrush(trail_color)
+                painter.drawEllipse(trail_point, radius, radius)
 
         # Soft glow halo.
         halo_color = QColor(self.PULSE_COLOR)
         halo_color.setAlpha(70)
         painter.setBrush(halo_color)
-        painter.setPen(Qt.PenStyle.NoPen)
         halo_radius = self._pulse_radius * 1.8
         painter.drawEllipse(current, halo_radius, halo_radius)
 

@@ -17,7 +17,7 @@ commit updates `CLAUDE.md`.
 
 ## Cursor overlay
 - [x] Overlay click-through + non-activating flags verified
-- [ ] Glowing blue dot + halo + comet trail
+- [x] Glowing blue dot + halo + comet trail
 - [ ] Idle breathing animation
 - [ ] Bezier-arc flight from POINT tags, ease-in-out
 - [ ] Per-monitor DPI coordinate mapping
