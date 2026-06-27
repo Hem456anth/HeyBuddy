@@ -19,6 +19,14 @@ class AudioConfig:
     sample_rate: int = DEFAULT_SAMPLE_RATE
     channels: int = DEFAULT_CHANNELS
     chunk_size: int = DEFAULT_CHUNK_SIZE
+    # sounddevice device index; `None` = system default input. The Settings
+    # panel populates a dropdown from `sd.query_devices()` and persists the
+    # selected device's index here. Stored as the integer index (not the
+    # device name) so the choice survives renames; the panel re-resolves
+    # the name on each open. A saved index that no longer exists (mic
+    # unplugged) falls through to AudioRecorder.start's exception path
+    # rather than silently picking a wrong device.
+    input_device_index: int | None = None
 
 
 @dataclass

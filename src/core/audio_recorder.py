@@ -57,16 +57,34 @@ class AudioRecorder:
         sample_rate: int = 16_000,
         channels: int = 1,
         block_size: int = 1024,
+        input_device_index: int | None = None,
     ) -> None:
         self.sample_rate = sample_rate
         self.channels = channels
         self.block_size = block_size
+        # `None` means "let sounddevice pick the system-default input".
+        # A specific index pins the recorder to that device for every
+        # subsequent start() call. Changeable at runtime via
+        # `set_input_device` (used by the Settings panel).
+        self._input_device_index: int | None = input_device_index
         self._stream: sd.InputStream | None = None
         self._frames: deque[bytes] = deque()
         self._lock = threading.Lock()
         self._recording = False
         self._on_chunk: PcmChunkCallback | None = None
         self._on_level: AudioLevelCallback | None = None
+
+    def set_input_device(self, device_index: int | None) -> None:
+        """Pin subsequent recordings to a specific sounddevice input index.
+
+        Takes effect on the NEXT `start()` — the currently-running stream
+        (if any) keeps its existing device until naturally torn down. The
+        Settings panel calls this after the user picks a new mic; the
+        hot-swap avoids restarting the app.
+        """
+        with self._lock:
+            self._input_device_index = device_index
+        log.info("Input device set to %r (system default if None)", device_index)
 
     def set_chunk_listener(self, on_chunk: PcmChunkCallback | None) -> None:
         """Register (or clear) a per-block PCM callback.
@@ -108,6 +126,9 @@ class AudioRecorder:
                     dtype="int16",
                     blocksize=self.block_size,
                     callback=self._on_block,
+                    # `device=None` makes sounddevice fall back to the
+                    # system default — same as not passing the kwarg at all.
+                    device=self._input_device_index,
                 )
                 self._stream.start()
             except Exception:

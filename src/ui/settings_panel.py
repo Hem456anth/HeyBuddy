@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..models.config import AppConfig
+from ..utils.logger import get_logger
 from ..utils.permissions import check_microphone, ping_worker
 from ..utils.win32 import (
     HOTKEY_PRESETS,
@@ -26,6 +27,32 @@ from ..utils.win32 import (
     is_autostart_enabled,
 )
 from . import theme
+
+log = get_logger(__name__)
+
+
+def _enumerate_input_devices() -> list[tuple[int, str]]:
+    """Return [(device_index, display_name), ...] for usable input devices.
+
+    Wrapped in try/except because sounddevice raises if no audio host is
+    present (rare, but it happens on stripped-down Windows installs and
+    in CI). A failure returns an empty list; the Settings panel then
+    shows only "System default", which is still functional.
+    """
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+    except Exception:
+        log.exception("sounddevice.query_devices failed; mic picker will be empty")
+        return []
+    inputs: list[tuple[int, str]] = []
+    for index, device in enumerate(devices):
+        # Only show devices that can actually record.
+        if int(device.get("max_input_channels", 0)) <= 0:
+            continue
+        name = device.get("name") or f"device {index}"
+        inputs.append((index, name))
+    return inputs
 
 
 class SettingsPanel(QDialog):
@@ -117,6 +144,25 @@ class SettingsPanel(QDialog):
         self.autostart.setChecked(is_autostart_enabled())
         form.addRow(self.autostart)
 
+        # ---- Microphone picker ----
+        # Populated from sounddevice.query_devices(); "System default"
+        # (data=None) is always the first row so users have a known-good
+        # fallback if their saved device disappeared (e.g. USB mic
+        # unplugged). The selected item's `data` carries the integer
+        # device index that AudioRecorder feeds to sd.InputStream.
+        self.mic_device = QComboBox()
+        self.mic_device.addItem("System default", None)
+        for device_index, device_name in _enumerate_input_devices():
+            self.mic_device.addItem(device_name, device_index)
+        # Restore the saved selection. findData returns -1 if the saved
+        # index is no longer present — fall back to "System default".
+        saved_device_index = config.audio.input_device_index
+        restore_idx = self.mic_device.findData(saved_device_index)
+        if restore_idx < 0:
+            restore_idx = 0
+        self.mic_device.setCurrentIndex(restore_idx)
+        form.addRow("Microphone", self.mic_device)
+
         # ---- Diagnostics: mic test ----
         self.mic_btn = QPushButton("Test microphone")
         self.mic_btn.setToolTip(
@@ -176,6 +222,12 @@ class SettingsPanel(QDialog):
         self.config.tts_enabled = self.tts_enabled.isChecked()
         self.config.screen_capture_enabled = self.screen_enabled.isChecked()
         self.config.transient_cursor_mode = self.transient_mode.isChecked()
+        # Mic picker: currentData() returns None for "System default" or
+        # an int for a real device. Track whether it changed so we only
+        # poke the live recorder when needed.
+        new_mic_index = self.mic_device.currentData()
+        mic_changed = new_mic_index != self.config.audio.input_device_index
+        self.config.audio.input_device_index = new_mic_index
 
         # Push autostart change through to the registry. We persist the
         # checkbox state into config as a hint for the next dialog opening,
@@ -207,6 +259,20 @@ class SettingsPanel(QDialog):
                     monitor.rebind(new_hotkey)
                 except Exception:
                     pass
+
+        # Hot-swap the recorder's input device so the next push-to-talk
+        # uses the new mic without a restart. Reached via the panel's
+        # manager → recorder chain. set_input_device only pins the index
+        # for subsequent start() calls; any in-flight recording finishes
+        # on the old device, which is the correct behavior.
+        if mic_changed:
+            owning_panel = self.parent()
+            recorder = getattr(getattr(owning_panel, "manager", None), "recorder", None)
+            if recorder is not None:
+                try:
+                    recorder.set_input_device(new_mic_index)
+                except Exception:
+                    log.exception("Failed to hot-swap recorder input device")
 
         self.settings_saved.emit(self.config)
         self.accept()

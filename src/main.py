@@ -189,6 +189,7 @@ def main() -> int:
         sample_rate=config.audio.sample_rate,
         channels=config.audio.channels,
         block_size=config.audio.chunk_size,
+        input_device_index=config.audio.input_device_index,
     )
     screen = ScreenCapture()
     proxy = CloudflareProxy(config.worker_url)
