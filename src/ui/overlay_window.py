@@ -32,6 +32,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QShowEvent
 from PyQt6.QtWidgets import QApplication, QWidget
 
+from ..models.config import AppConfig
 from ..models.message import PointMarker
 from ..utils.logger import get_logger
 from ..utils.win32 import (
@@ -87,6 +88,12 @@ class CursorOverlay(QWidget):
     # flight reaches its destination. Removes the previous abrupt snap.
     LABEL_FADE_IN_DURATION_MS = 300
 
+    # ---- transient-mode window-opacity fade tuning ----
+    # When `config.transient_cursor_mode` is on, the overlay stands in
+    # for the panel — it must not pop in or pop out. This duration covers
+    # both directions of the windowOpacity ramp.
+    TRANSIENT_FADE_DURATION_MS = 350
+
     # ---- comet trail tuning ----
     # Length of the trail in samples. At 60fps a 12-sample trail covers
     # ~200ms of motion, which reads as a clear smear without obscuring
@@ -99,13 +106,16 @@ class CursorOverlay(QWidget):
     # zero linearly from this value.
     TRAIL_HEAD_ALPHA = 130
 
-    def __init__(self) -> None:
+    def __init__(self, config: AppConfig) -> None:
         super().__init__(
             None,
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool,
         )
+        # Held so show/hide helpers can branch on transient_cursor_mode
+        # without main.py re-wiring every time the setting changes.
+        self.config = config
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -193,6 +203,19 @@ class CursorOverlay(QWidget):
         self._label_fade_animation.setStartValue(0.0)
         self._label_fade_animation.setEndValue(1.0)
         self._label_fade_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        # Transient-mode windowOpacity fade. Used both directions:
+        # _show_with_fade_in starts at 0->1; _hide_with_fade_out starts
+        # at current opacity -> 0 and then actually calls hide() when
+        # the animation finishes. The pending-hide flag tells the
+        # finished slot whether to call hide() or skip it.
+        self._window_opacity_animation = QPropertyAnimation(
+            self, b"windowOpacity", self,
+        )
+        self._window_opacity_animation.setDuration(self.TRANSIENT_FADE_DURATION_MS)
+        self._window_opacity_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._window_opacity_animation.finished.connect(self._on_window_fade_finished)
+        self._pending_hide_after_fade: bool = False
 
         self._dismiss_or_next_timer = QTimer(self)
         self._dismiss_or_next_timer.setSingleShot(True)
@@ -315,7 +338,50 @@ class CursorOverlay(QWidget):
         self._flight_control_widget = None
         self._current_label = ""
         self._trail_points.clear()
-        self.hide()
+        self._hide_with_fade_out()
+
+    # ---- transient-mode opacity fade helpers ----
+    def _show_with_fade_in(self) -> None:
+        """Show the overlay; in transient mode, ramp opacity 0 -> 1.
+
+        Non-transient mode keeps the existing instant-show behavior so
+        the upgrade doesn't slow normal interactions where the panel
+        provides the visual context anyway.
+        """
+        if self.config.transient_cursor_mode:
+            self.setWindowOpacity(0.0)
+            self.show()
+            self._window_opacity_animation.stop()
+            self._pending_hide_after_fade = False
+            self._window_opacity_animation.setStartValue(0.0)
+            self._window_opacity_animation.setEndValue(1.0)
+            self._window_opacity_animation.start()
+        else:
+            self.setWindowOpacity(1.0)
+            self.show()
+
+    def _hide_with_fade_out(self) -> None:
+        """In transient mode, fade opacity to 0 then hide(). Else hide now.
+
+        Animating then calling hide() (rather than calling hide() while
+        opaque) gives the user a chance to see the overlay leaving — in
+        transient mode, this matters because the panel isn't visible to
+        confirm the turn ended.
+        """
+        if self.config.transient_cursor_mode:
+            self._window_opacity_animation.stop()
+            self._pending_hide_after_fade = True
+            self._window_opacity_animation.setStartValue(self.windowOpacity())
+            self._window_opacity_animation.setEndValue(0.0)
+            self._window_opacity_animation.start()
+        else:
+            self.hide()
+
+    def _on_window_fade_finished(self) -> None:
+        """Animation `finished` slot — completes a deferred hide if pending."""
+        if self._pending_hide_after_fade:
+            self._pending_hide_after_fade = False
+            self.hide()
 
     # ---- queue driver ----
     def _advance_queue(self) -> None:
@@ -379,10 +445,11 @@ class CursorOverlay(QWidget):
         # would smear visually across the cut.
         self._trail_points.clear()
 
-        # Show window, raise, then run the animation. The ex-style re-apply
-        # happens automatically inside `showEvent` (centralized in cycle 9 so
-        # any future code path that calls `show()` is also covered).
-        self.show()
+        # Show window (fading in if in transient mode), raise, then run
+        # the animation. The ex-style re-apply happens automatically
+        # inside `showEvent` (centralized in cycle 9 so any future code
+        # path that calls `show()` is also covered).
+        self._show_with_fade_in()
         self.raise_()
         self._pulse_animation.stop()
         self._halo_alpha_animation.stop()
@@ -431,7 +498,7 @@ class CursorOverlay(QWidget):
         self._flight_control_widget = None
         self._current_label = ""
         self._trail_points.clear()
-        self.hide()
+        self._hide_with_fade_out()
 
     # ---- bezier math ----
     @staticmethod

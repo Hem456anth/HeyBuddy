@@ -170,7 +170,7 @@ def main() -> int:
     )
 
     panel = MainPanel(config, manager)
-    overlay = CursorOverlay()
+    overlay = CursorOverlay(config)
     # POINT markers from Claude → cursor overlay queue (queued connection so the
     # call hops to the Qt thread regardless of which thread the signal fires on).
     manager.point_received.connect(

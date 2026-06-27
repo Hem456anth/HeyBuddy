@@ -22,7 +22,7 @@ commit updates `CLAUDE.md`.
 - [x] Bezier-arc flight from POINT tags, ease-in-out
 - [x] Per-monitor DPI coordinate mapping
 - [x] Arrival ripple + label caption fade
-- [ ] Transient mode fade in/out
+- [x] Transient mode fade in/out
 
 ## Etc
 - [ ] Tray menu: Open, Toggle Companion, Settings, Quit
