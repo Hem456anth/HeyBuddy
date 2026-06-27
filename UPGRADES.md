@@ -20,7 +20,7 @@ commit updates `CLAUDE.md`.
 - [x] Glowing blue dot + halo + comet trail
 - [x] Idle breathing animation
 - [x] Bezier-arc flight from POINT tags, ease-in-out
-- [ ] Per-monitor DPI coordinate mapping
+- [x] Per-monitor DPI coordinate mapping
 - [ ] Arrival ripple + label caption fade
 - [ ] Transient mode fade in/out
 

@@ -244,8 +244,8 @@ if _shcore is not None:
 # ---------------------------------------------------------------------------
 
 
-def enable_per_monitor_dpi_awareness() -> None:
-    """Opt the process into per-monitor DPI awareness v2.
+def enable_per_monitor_dpi_awareness() -> str:
+    """Opt the process into per-monitor DPI awareness v2 (with fallbacks).
 
     Call once at startup, before any window is shown. Without this, screen
     capture and overlay positioning silently use 96-DPI logical coordinates on
@@ -253,24 +253,40 @@ def enable_per_monitor_dpi_awareness() -> None:
 
     Falls back through older awareness APIs because v2 only exists on
     Windows 10 1703+. We do not support anything older than that.
+
+    Returns the tier actually applied, suitable for logging:
+
+    * `"per-monitor-v2"` — the modern best path (Win 10 1703+).
+      Each monitor's DPI is queried independently; widget pixels match
+      what the user sees per display, even after dragging across screens.
+    * `"per-monitor"` — older shcore API (Win 8.1+). Per-display DPI but
+      changes after process start aren't picked up cleanly.
+    * `"system"` — single global DPI scale. Cursor placement drifts when
+      monitors have different DPIs.
+    * `"none"` — call failed; coords will be treated as raw 96-DPI logical.
+      `cycle-12` POINT-flight log will show a `dpi=1.00x` regardless of
+      the user's real scale — diagnostic for "all my points land in the
+      wrong place".
     """
     if sys.platform != "win32":
-        return
+        return "none"
     try:
         # Preferred path: per-monitor v2 (Win10 1703+)
         if hasattr(_user32, "SetProcessDpiAwarenessContext"):
             _user32.SetProcessDpiAwarenessContext(
                 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
             )
-            return
+            return "per-monitor-v2"
         # Fallback: shcore per-monitor (Win 8.1+)
         if _shcore is not None and hasattr(_shcore, "SetProcessDpiAwareness"):
             _shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
-            return
+            return "per-monitor"
         # Last resort: system-wide
         _user32.SetProcessDPIAware()
+        return "system"
     except OSError:
         log.exception("Failed to set DPI awareness; cursor placement may drift")
+        return "none"
 
 
 def get_cursor_position() -> tuple[int, int]:

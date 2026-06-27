@@ -134,7 +134,12 @@ def _build_tray_icon(
 
 def main() -> int:
     # Order matters here: DPI awareness must be set before *any* HWND exists.
-    enable_per_monitor_dpi_awareness()
+    # The return value names which tier the OS accepted so an operator can
+    # diagnose "all my points land off-target" by grepping for this line in
+    # logs/heybuddy.log — a tier of "none" or "system" on a HiDPI machine
+    # is the smoking gun.
+    dpi_awareness_tier = enable_per_monitor_dpi_awareness()
+    log.info("DPI awareness: %s", dpi_awareness_tier)
 
     qt_app = QApplication(sys.argv)
     qt_app.setApplicationName(APP_NAME)
