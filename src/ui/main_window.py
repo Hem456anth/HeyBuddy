@@ -370,6 +370,11 @@ class MainPanel(QWidget):
         # Set True the first time we try `apply_blur_behind`; prevents
         # re-attempting (and re-styling) on every show/hide cycle.
         self._dwm_backdrop_attempted = False
+        # The assistant bubble that is currently being filled by streaming
+        # deltas. Set on the first `assistant_partial` of a turn, cleared
+        # when the final `message_appended` lands (or on error). None
+        # outside a streaming turn.
+        self._in_progress_assistant_bubble: QLabel | None = None
 
         # Include the shadow margin in the overall window size so the
         # visible chrome stays the configured panel_width / panel_height.
@@ -588,6 +593,10 @@ class MainPanel(QWidget):
         # marshals to the UI thread because emitter and receiver have
         # different thread affinity.
         self.manager.audio_level_changed.connect(self.waveform_meter.add_sample)
+        # Streaming reply: each Claude SSE delta appends to the in-progress
+        # bubble. Final message_appended replaces its text with the cleaned
+        # content (POINT tags stripped). See _on_assistant_partial.
+        self.manager.assistant_partial.connect(self._on_assistant_partial)
 
     # ---- slots ----
     def _set_state_chip(self, state: CompanionState) -> None:
@@ -624,20 +633,70 @@ class MainPanel(QWidget):
                 self.hide()
 
     def _append_message(self, msg: Message) -> None:
-        bubble = QLabel(msg.content)
+        """Render a finalized Message.
+
+        Two paths:
+
+        * Assistant message AND there's already an in-progress bubble that
+          was being filled by streaming deltas → replace its text with the
+          cleaned final content (POINT tags stripped by ClaudeClient before
+          we got here) and release the in-progress slot. Avoids the
+          "duplicate bubble at end of stream" bug.
+        * Otherwise (user message, or assistant message with no streaming
+          delta first, e.g. non-streaming code path) → create a new bubble.
+        """
+        if (
+            msg.role == Role.ASSISTANT
+            and self._in_progress_assistant_bubble is not None
+        ):
+            self._in_progress_assistant_bubble.setText(msg.content)
+            self._in_progress_assistant_bubble = None
+            self._scroll_chat_to_bottom()
+            return
+        bubble = self._make_chat_bubble(msg.content, msg.role)
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
+        self._scroll_chat_to_bottom()
+
+    @pyqtSlot(str)
+    def _on_assistant_partial(self, delta: str) -> None:
+        """One Claude SSE text delta arrived. Append it to the live bubble.
+
+        Empty deltas are quietly dropped (Anthropic occasionally emits
+        zero-text content_block_delta events for whitespace boundaries).
+        """
+        if not delta:
+            return
+        if self._in_progress_assistant_bubble is None:
+            # First chunk of this turn — materialize the bubble now and
+            # store the reference so subsequent deltas can append in place.
+            bubble = self._make_chat_bubble("", Role.ASSISTANT)
+            self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
+            self._in_progress_assistant_bubble = bubble
+        bubble = self._in_progress_assistant_bubble
+        bubble.setText(bubble.text() + delta)
+        self._scroll_chat_to_bottom()
+
+    def _make_chat_bubble(self, text: str, role: Role) -> QLabel:
+        """Build a chat bubble QLabel with the per-role styling."""
+        bubble = QLabel(text)
         bubble.setWordWrap(True)
-        bubble.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        cls = "userBubble" if msg.role == Role.USER else "assistantBubble"
+        bubble.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse,
+        )
+        cls = "userBubble" if role == Role.USER else "assistantBubble"
         bubble.setProperty("class", cls)
-        # Re-apply style after dynamic property change
+        # Re-apply style after dynamic property change. (The bubble
+        # background/padding/radius hex literals migrate to theme tokens
+        # in a later cycle — kept inline here to honor "no extra refactors
+        # outside the cycle's task".)
         bubble.setStyleSheet(
             "background:#2e3a4f; padding:8px 10px; border-radius:10px;"
-            if msg.role == Role.USER
+            if role == Role.USER
             else "background:#0f3a52; padding:8px 10px; border-radius:10px;"
         )
-        # Insert before the trailing stretch
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
-        # Scroll to bottom on next tick
+        return bubble
+
+    def _scroll_chat_to_bottom(self) -> None:
         bar = self.scroll.verticalScrollBar()
         bar.setValue(bar.maximum())
 
@@ -649,6 +708,11 @@ class MainPanel(QWidget):
         if not self.isVisible():
             self.show()
             self.raise_()
+        # Release the streaming bubble slot. The partial text already in the
+        # bubble stays visible so the user can see what Claude was saying
+        # when the error hit, but the NEXT assistant turn will create a
+        # fresh bubble instead of appending into the abandoned one.
+        self._in_progress_assistant_bubble = None
         self._error_clear_timer.start(8_000)
 
     def _clear_error_banner(self) -> None:
