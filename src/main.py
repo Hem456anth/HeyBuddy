@@ -38,6 +38,7 @@ if __package__ in (None, ""):
 from src.api.claude_client import ClaudeClient
 from src.api.cloudflare_proxy import CloudflareProxy
 from src.api.elevenlabs_client import ElevenLabsClient
+from src.core import chimes
 from src.core.audio_player import AudioPlayer
 from src.core.audio_recorder import AudioRecorder
 from src.core.companion_manager import CompanionManager, CompanionState
@@ -244,6 +245,24 @@ def main() -> int:
             log.exception("Failed to update tray icon for state %s", state.value)
 
     manager.state_changed.connect(_on_state_changed_repaint_tray)
+
+    # Audio cues: rising tone on IDLE -> LISTENING, falling tone on
+    # LISTENING -> anything else. Tracking the previous state in a
+    # one-element list (a mutable closure cell) is the smallest way to
+    # detect the LISTENING-edge transitions; using a module-level dict
+    # or a class would be heavier without adding clarity here. The
+    # manager only emits state_changed on actual transitions, so
+    # `new_state == LISTENING` reliably means "entering listening".
+    _previous_state_holder: list[CompanionState] = [CompanionState.IDLE]
+
+    def _on_state_changed_play_chime(new_state: CompanionState) -> None:
+        if new_state == CompanionState.LISTENING:
+            chimes.play_start_chime()
+        elif _previous_state_holder[0] == CompanionState.LISTENING:
+            chimes.play_stop_chime()
+        _previous_state_holder[0] = new_state
+
+    manager.state_changed.connect(_on_state_changed_play_chime)
 
     # `run_detached` returns immediately and runs the tray loop on its own
     # thread, which is what we want when sharing the process with Qt.

@@ -75,7 +75,12 @@ _STATE_LABELS: dict[CompanionState, tuple[str, str]] = {
     CompanionState.IDLE: ("Idle", theme.Color.STATE_IDLE),
     CompanionState.LISTENING: ("Listening...", theme.Color.STATE_LISTENING),
     CompanionState.PROCESSING: ("Processing...", theme.Color.STATE_PROCESSING),
-    CompanionState.RESPONDING: ("Responding...", theme.Color.STATE_RESPONDING),
+    # Trailing musical-note glyph is the cycle-22 TTS-playing indicator:
+    # RESPONDING is the only state during which AudioPlayer is producing
+    # sound, so this label uniquely flags "the speakers are active".
+    # Segoe UI (the panel font) renders ♪ cleanly on Win 10/11 without
+    # falling back to an emoji font.
+    CompanionState.RESPONDING: ("Responding... ♪", theme.Color.STATE_RESPONDING),
     CompanionState.ERROR: ("Error", theme.Color.STATE_ERROR),
 }
 

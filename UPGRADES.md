@@ -34,4 +34,4 @@ commit updates `CLAUDE.md`.
   - [x] hotkey capture (cycle 19)
   - [x] voice_id (cycle 20 — informational; Worker contract unchanged)
 - [x] Settings persist + apply live
-- [ ] Start/stop chimes + TTS-playing indicator
+- [x] Start/stop chimes + TTS-playing indicator
