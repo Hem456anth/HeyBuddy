@@ -21,7 +21,7 @@ commit updates `CLAUDE.md`.
 - [x] Idle breathing animation
 - [x] Bezier-arc flight from POINT tags, ease-in-out
 - [x] Per-monitor DPI coordinate mapping
-- [ ] Arrival ripple + label caption fade
+- [x] Arrival ripple + label caption fade
 - [ ] Transient mode fade in/out
 
 ## Etc

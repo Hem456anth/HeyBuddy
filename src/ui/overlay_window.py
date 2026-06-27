@@ -29,7 +29,7 @@ from PyQt6.QtCore import (
     pyqtProperty,
     pyqtSlot,
 )
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QShowEvent
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QShowEvent
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from ..models.message import PointMarker
@@ -74,6 +74,19 @@ class CursorOverlay(QWidget):
     # comet trail (cycle 10) for attention.
     HALO_FLIGHT_ALPHA = 95
 
+    # ---- arrival ripple tuning ----
+    # One-shot expanding ring painted when the dot lands at a POINT.
+    # Reads as a "got here" beat; pairs with the label fade-in below.
+    ARRIVAL_RIPPLE_DURATION_MS = 700
+    ARRIVAL_RIPPLE_MAX_RADIUS_RATIO = 4.0     # ring grows to 4x dot radius
+    ARRIVAL_RIPPLE_START_ALPHA = 180          # ring opacity at the start of expansion
+    ARRIVAL_RIPPLE_STROKE_WIDTH = 3           # ring stroke thickness in px
+
+    # ---- label caption fade-in tuning ----
+    # Fades the label bubble in over LABEL_FADE_IN_DURATION_MS once the
+    # flight reaches its destination. Removes the previous abrupt snap.
+    LABEL_FADE_IN_DURATION_MS = 300
+
     # ---- comet trail tuning ----
     # Length of the trail in samples. At 60fps a 12-sample trail covers
     # ~200ms of motion, which reads as a clear smear without obscuring
@@ -114,6 +127,15 @@ class CursorOverlay(QWidget):
         # (before the breath animation has had a frame to fire) doesn't
         # show an unexpectedly dim halo.
         self._halo_alpha: int = self.HALO_PEAK_ALPHA
+        # Arrival ripple progress in [0, 1]. 0 = ring at dot radius +
+        # full alpha; 1 = ring at MAX_RADIUS_RATIO + zero alpha. Drawn
+        # only while the one-shot ripple animation is Running.
+        self._arrival_ripple_progress: float = 0.0
+        # Label caption opacity multiplier in [0, 1]. 0 = invisible,
+        # 1 = fully visible. The bubble bg + text colors get scaled by
+        # this in paintEvent. Defaults to 0 so a fresh overlay shows no
+        # label until a flight finishes.
+        self._label_alpha: float = 0.0
         # Comet trail — bounded ring buffer of recent dot positions in
         # widget-local coords. Appended to while the flight animation is
         # running; cleared on flight-finished and on dismiss so the at-rest
@@ -151,6 +173,26 @@ class CursorOverlay(QWidget):
         self._halo_alpha_animation.setEndValue(self.HALO_BASE_ALPHA)
         self._halo_alpha_animation.setLoopCount(-1)
         self._halo_alpha_animation.setEasingCurve(QEasingCurve.Type.InOutSine)
+
+        # Arrival ripple — one-shot expanding ring. OutQuad easing so
+        # the ring sprints outward at first then settles, matching how
+        # a real water-drop ripple looks.
+        self._arrival_ripple_animation = QPropertyAnimation(
+            self, b"arrivalRippleProgress", self,
+        )
+        self._arrival_ripple_animation.setDuration(self.ARRIVAL_RIPPLE_DURATION_MS)
+        self._arrival_ripple_animation.setStartValue(0.0)
+        self._arrival_ripple_animation.setEndValue(1.0)
+        self._arrival_ripple_animation.setEasingCurve(QEasingCurve.Type.OutQuad)
+
+        # Label caption fade-in. One-shot 0->1 alpha ramp. OutCubic so
+        # the bubble appears decisively then settles, instead of a slow
+        # linear materialization.
+        self._label_fade_animation = QPropertyAnimation(self, b"labelAlpha", self)
+        self._label_fade_animation.setDuration(self.LABEL_FADE_IN_DURATION_MS)
+        self._label_fade_animation.setStartValue(0.0)
+        self._label_fade_animation.setEndValue(1.0)
+        self._label_fade_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         self._dismiss_or_next_timer = QTimer(self)
         self._dismiss_or_next_timer.setSingleShot(True)
@@ -192,6 +234,29 @@ class CursorOverlay(QWidget):
         self.update()
 
     haloAlpha = pyqtProperty(int, fget=get_halo_alpha, fset=set_halo_alpha)
+
+    def get_arrival_ripple_progress(self) -> float:
+        return self._arrival_ripple_progress
+
+    def set_arrival_ripple_progress(self, value: float) -> None:
+        self._arrival_ripple_progress = value
+        self.update()
+
+    arrivalRippleProgress = pyqtProperty(
+        float,
+        fget=get_arrival_ripple_progress,
+        fset=set_arrival_ripple_progress,
+    )
+
+    def get_label_alpha(self) -> float:
+        return self._label_alpha
+
+    def set_label_alpha(self, value: float) -> None:
+        # Clamp defensively (OutCubic doesn't overshoot but cost is zero).
+        self._label_alpha = max(0.0, min(1.0, value))
+        self.update()
+
+    labelAlpha = pyqtProperty(float, fget=get_label_alpha, fset=set_label_alpha)
 
     # ---- native window setup ----
     def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
@@ -239,6 +304,9 @@ class CursorOverlay(QWidget):
         self._flight_animation.stop()
         self._pulse_animation.stop()
         self._halo_alpha_animation.stop()
+        self._arrival_ripple_animation.stop()
+        self._label_fade_animation.stop()
+        self._label_alpha = 0.0
         self._dismiss_or_next_timer.stop()
         self._marker_queue.clear()
         self._busy = False
@@ -318,6 +386,12 @@ class CursorOverlay(QWidget):
         self.raise_()
         self._pulse_animation.stop()
         self._halo_alpha_animation.stop()
+        self._arrival_ripple_animation.stop()
+        # Label must vanish at the start of every flight so the in-flight
+        # dot doesn't carry the previous POINT's caption with it. The
+        # fade-in animation rebuilds it from 0 when the flight finishes.
+        self._label_fade_animation.stop()
+        self._label_alpha = 0.0
         self._flight_animation.stop()
         self._flight_animation.setDuration(
             self._duration_for_flight(start_widget, end_widget),
@@ -331,6 +405,13 @@ class CursorOverlay(QWidget):
         # Drop the comet trail here so the at-rest breath stays clean — the
         # tail reads as "still in motion" and would compete with the breath.
         self._trail_points.clear()
+        # Arrival flourish: one-shot ripple + one-shot label fade-in. Both
+        # restarted from scratch even if a previous one was mid-flight
+        # (start() on a Running animation rewinds and replays).
+        self._arrival_ripple_animation.stop()
+        self._arrival_ripple_animation.start()
+        self._label_fade_animation.stop()
+        self._label_fade_animation.start()
         self._pulse_animation.start()
         self._halo_alpha_animation.start()
         self._dismiss_or_next_timer.start(
@@ -341,6 +422,9 @@ class CursorOverlay(QWidget):
         self._busy = False
         self._pulse_animation.stop()
         self._halo_alpha_animation.stop()
+        self._arrival_ripple_animation.stop()
+        self._label_fade_animation.stop()
+        self._label_alpha = 0.0
         self._dismiss_or_next_timer.stop()
         self._flight_start_widget = None
         self._flight_end_widget = None
@@ -453,8 +537,37 @@ class CursorOverlay(QWidget):
         painter.setBrush(self.PULSE_COLOR)
         painter.drawEllipse(current, self._pulse_radius, self._pulse_radius)
 
-        # Label bubble shown only at rest (flight done).
-        if self._current_label and self._flight_progress >= 0.999:
+        # Arrival ripple — expanding stroked ring. Drawn AFTER the dot so
+        # the ring appears to emanate from the dot's edge. Only painted
+        # while the one-shot ripple animation is Running; idle paints
+        # (during the at-rest breath) skip it cleanly.
+        if (
+            self._arrival_ripple_animation.state()
+            == QPropertyAnimation.State.Running
+        ):
+            progress = self._arrival_ripple_progress
+            # Lerp radius from `dot_radius` -> `dot_radius * MAX_RATIO`.
+            ripple_radius = self._pulse_radius * (
+                1.0 + progress * (self.ARRIVAL_RIPPLE_MAX_RADIUS_RATIO - 1.0)
+            )
+            ripple_alpha = int(
+                self.ARRIVAL_RIPPLE_START_ALPHA * (1.0 - progress)
+            )
+            ripple_color = QColor(self.PULSE_COLOR)
+            ripple_color.setAlpha(max(0, ripple_alpha))
+            ring_pen = QPen(ripple_color)
+            ring_pen.setWidth(self.ARRIVAL_RIPPLE_STROKE_WIDTH)
+            painter.setPen(ring_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(current, ripple_radius, ripple_radius)
+            # Reset pen state so the label section below isn't surprised
+            # by a stroked-circle pen leaking in.
+            painter.setPen(Qt.PenStyle.NoPen)
+
+        # Label bubble — gate on the fade-in alpha so the bubble appears
+        # smoothly over LABEL_FADE_IN_DURATION_MS instead of snapping in
+        # the instant the bezier crosses 99.9% progress.
+        if self._current_label and self._label_alpha > 0.0:
             label_font = QFont("Segoe UI", 11, QFont.Weight.DemiBold)
             painter.setFont(label_font)
             metrics = QFontMetrics(label_font)
@@ -464,9 +577,12 @@ class CursorOverlay(QWidget):
             bubble_y = current.y() - text_height // 2
             bubble_rect = QRect(bubble_x, bubble_y, text_width, text_height)
 
-            painter.setBrush(QColor(20, 30, 48, 220))
+            # Scale both bg and text alpha by the fade-in factor.
+            bg_alpha = int(220 * self._label_alpha)
+            text_alpha = int(255 * self._label_alpha)
+            painter.setBrush(QColor(20, 30, 48, bg_alpha))
             painter.drawRoundedRect(bubble_rect, 8, 8)
-            painter.setPen(QColor(255, 255, 255))
+            painter.setPen(QColor(255, 255, 255, text_alpha))
             painter.drawText(
                 bubble_rect, Qt.AlignmentFlag.AlignCenter, self._current_label,
             )
