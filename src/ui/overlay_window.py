@@ -54,6 +54,26 @@ class CursorOverlay(QWidget):
     HOLD_AT_TARGET_MS = 2_200             # pulse time before dismiss / next
     INTER_POINT_GAP_MS = 250              # breathing room between queued points
 
+    # ---- breathing animation tuning ----
+    # Slow enough to read as a breath, not a heartbeat. One full inhale-
+    # exhale cycle. Both the radius pulse and the halo-alpha pulse use
+    # this period so they stay synchronized — peak brightness at peak
+    # size, dim and small together.
+    BREATH_PERIOD_MS = 2_400
+    # Peak radius as a fraction of PULSE_BASE_RADIUS at the breath's mid-
+    # point. Kept subtle (~25% growth) so the resting dot feels alive
+    # without distracting the user from whatever is being pointed at.
+    PULSE_PEAK_RADIUS_RATIO = 1.25
+    # Halo alpha range. The dim end is the resting baseline; the bright
+    # end is the breath peak. Both lower than the flight-time halo so
+    # at-rest reads as calm vs. in-motion energy.
+    HALO_BASE_ALPHA = 50
+    HALO_PEAK_ALPHA = 110
+    # Halo alpha used while the dot is actively flying. Kept constant
+    # during flight because a breathing halo would compete with the
+    # comet trail (cycle 10) for attention.
+    HALO_FLIGHT_ALPHA = 95
+
     # ---- comet trail tuning ----
     # Length of the trail in samples. At 60fps a 12-sample trail covers
     # ~200ms of motion, which reads as a clear smear without obscuring
@@ -89,6 +109,11 @@ class CursorOverlay(QWidget):
         self._flight_control_widget: QPoint | None = None
         self._current_label: str = ""
         self._pulse_radius: float = self.PULSE_BASE_RADIUS
+        # Animated halo opacity (0-255) driven by the at-rest breath
+        # animation. Initialized to the peak so the very first paint
+        # (before the breath animation has had a frame to fire) doesn't
+        # show an unexpectedly dim halo.
+        self._halo_alpha: int = self.HALO_PEAK_ALPHA
         # Comet trail — bounded ring buffer of recent dot positions in
         # widget-local coords. Appended to while the flight animation is
         # running; cleared on flight-finished and on dismiss so the at-rest
@@ -107,12 +132,25 @@ class CursorOverlay(QWidget):
         self._flight_animation.finished.connect(self._on_flight_finished)
 
         self._pulse_animation = QPropertyAnimation(self, b"pulseRadius", self)
-        self._pulse_animation.setDuration(900)
+        self._pulse_animation.setDuration(self.BREATH_PERIOD_MS)
         self._pulse_animation.setStartValue(self.PULSE_BASE_RADIUS)
-        self._pulse_animation.setKeyValueAt(0.5, self.PULSE_BASE_RADIUS * 1.6)
+        self._pulse_animation.setKeyValueAt(
+            0.5, self.PULSE_BASE_RADIUS * self.PULSE_PEAK_RADIUS_RATIO,
+        )
         self._pulse_animation.setEndValue(self.PULSE_BASE_RADIUS)
         self._pulse_animation.setLoopCount(-1)
         self._pulse_animation.setEasingCurve(QEasingCurve.Type.InOutSine)
+
+        # Halo brightness breath, synchronized with the radius pulse so
+        # the dot grows brighter as it grows larger and dims as it shrinks
+        # — reads as a single breath, not two competing animations.
+        self._halo_alpha_animation = QPropertyAnimation(self, b"haloAlpha", self)
+        self._halo_alpha_animation.setDuration(self.BREATH_PERIOD_MS)
+        self._halo_alpha_animation.setStartValue(self.HALO_BASE_ALPHA)
+        self._halo_alpha_animation.setKeyValueAt(0.5, self.HALO_PEAK_ALPHA)
+        self._halo_alpha_animation.setEndValue(self.HALO_BASE_ALPHA)
+        self._halo_alpha_animation.setLoopCount(-1)
+        self._halo_alpha_animation.setEasingCurve(QEasingCurve.Type.InOutSine)
 
         self._dismiss_or_next_timer = QTimer(self)
         self._dismiss_or_next_timer.setSingleShot(True)
@@ -143,6 +181,17 @@ class CursorOverlay(QWidget):
         self.update()
 
     pulseRadius = pyqtProperty(float, fget=get_pulse_radius, fset=set_pulse_radius)
+
+    def get_halo_alpha(self) -> int:
+        return self._halo_alpha
+
+    def set_halo_alpha(self, value: int) -> None:
+        # Clamp defensively — Qt's animation interpolation can briefly
+        # overshoot the endpoint values by a hair on InOutSine.
+        self._halo_alpha = max(0, min(255, int(value)))
+        self.update()
+
+    haloAlpha = pyqtProperty(int, fget=get_halo_alpha, fset=set_halo_alpha)
 
     # ---- native window setup ----
     def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
@@ -189,6 +238,7 @@ class CursorOverlay(QWidget):
     def dismiss(self) -> None:
         self._flight_animation.stop()
         self._pulse_animation.stop()
+        self._halo_alpha_animation.stop()
         self._dismiss_or_next_timer.stop()
         self._marker_queue.clear()
         self._busy = False
@@ -256,6 +306,7 @@ class CursorOverlay(QWidget):
         self.show()
         self.raise_()
         self._pulse_animation.stop()
+        self._halo_alpha_animation.stop()
         self._flight_animation.stop()
         self._flight_animation.setDuration(
             self._duration_for_flight(start_widget, end_widget),
@@ -264,12 +315,13 @@ class CursorOverlay(QWidget):
         self._flight_animation.start()
 
     def _on_flight_finished(self) -> None:
-        # Park at the destination and pulse for HOLD_AT_TARGET_MS, then either
+        # Park at the destination and breathe for HOLD_AT_TARGET_MS, then
         # advance to the next queued point or dismiss the overlay.
-        # Drop the comet trail here so the at-rest pulse stays clean — the
-        # tail reads as "still in motion" and would compete with the pulse.
+        # Drop the comet trail here so the at-rest breath stays clean — the
+        # tail reads as "still in motion" and would compete with the breath.
         self._trail_points.clear()
         self._pulse_animation.start()
+        self._halo_alpha_animation.start()
         self._dismiss_or_next_timer.start(
             self.HOLD_AT_TARGET_MS + self.INTER_POINT_GAP_MS,
         )
@@ -277,6 +329,7 @@ class CursorOverlay(QWidget):
     def _finish_and_hide(self) -> None:
         self._busy = False
         self._pulse_animation.stop()
+        self._halo_alpha_animation.stop()
         self._dismiss_or_next_timer.stop()
         self._flight_start_widget = None
         self._flight_end_widget = None
@@ -375,8 +428,12 @@ class CursorOverlay(QWidget):
                 painter.drawEllipse(trail_point, radius, radius)
 
         # Soft glow halo.
+        # At rest (flight done), the alpha is animated by the breath
+        # animation. During flight, hold it at HALO_FLIGHT_ALPHA so it
+        # doesn't compete with the comet trail.
+        at_rest = self._flight_progress >= 0.999
         halo_color = QColor(self.PULSE_COLOR)
-        halo_color.setAlpha(70)
+        halo_color.setAlpha(self._halo_alpha if at_rest else self.HALO_FLIGHT_ALPHA)
         painter.setBrush(halo_color)
         halo_radius = self._pulse_radius * 1.8
         painter.drawEllipse(current, halo_radius, halo_radius)
