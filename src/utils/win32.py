@@ -384,6 +384,39 @@ def apply_overlay_window_styles(hwnd: int) -> None:
     _user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
 
 
+def apply_panel_window_styles(hwnd: int) -> None:
+    """Mark the floating panel as non-activating and off-taskbar.
+
+    Sibling to `apply_overlay_window_styles` with a different flag set:
+
+    * `WS_EX_NOACTIVATE` — the panel never becomes the foreground/active
+      window when shown or clicked. Prevents focus theft from whatever app
+      the user was working in. Buttons inside the panel still receive
+      clicks (Qt routes mouse events regardless of OS activation state).
+    * `WS_EX_TOOLWINDOW` — no taskbar button, no Alt+Tab entry. Matches
+      the macOS Clicky behavior (the app lives in the tray; the panel is
+      ephemeral chrome, not an app window in its own right).
+
+    Deliberately omitted vs. the overlay:
+
+    * `WS_EX_TRANSPARENT` — we want clicks on the panel's buttons and
+      title bar to register, not pass through.
+    * `WS_EX_LAYERED` — the DWM backdrop (see `apply_blur_behind`) does
+      our compositing; layered would conflict with it.
+
+    Known trade-off: the embedded QLineEdit cannot receive keyboard
+    input while the panel is non-active. Users who type rather than
+    speak must explicitly bring the panel forward (e.g. click into it
+    and have Qt invoke `activateWindow()`). Matches upstream Clicky's
+    voice-first design.
+
+    Idempotent — safe to call more than once.
+    """
+    ex_style = _user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    ex_style |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+    _user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
+
+
 # ---------------------------------------------------------------------------
 # DPI mapping for POINT coordinates
 # ---------------------------------------------------------------------------

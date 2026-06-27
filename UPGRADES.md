@@ -13,7 +13,7 @@ commit updates `CLAUDE.md`.
 - [x] Mic level waveform meter while listening
 - [x] Streaming reply area fills token-by-token
 - [x] Hover states + pointer cursor on all buttons
-- [ ] Panel non-activating (WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW)
+- [x] Panel non-activating (WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW)
 
 ## Cursor overlay
 - [ ] Overlay click-through + non-activating flags verified

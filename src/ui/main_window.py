@@ -62,7 +62,7 @@ from ..core.companion_manager import CompanionManager, CompanionState
 from ..models.config import AppConfig
 from ..models.message import Message, Role
 from ..utils.logger import get_logger
-from ..utils.win32 import apply_blur_behind
+from ..utils.win32 import apply_blur_behind, apply_panel_window_styles
 from . import theme
 from .settings_panel import SettingsPanel
 
@@ -370,6 +370,10 @@ class MainPanel(QWidget):
         # Set True the first time we try `apply_blur_behind`; prevents
         # re-attempting (and re-styling) on every show/hide cycle.
         self._dwm_backdrop_attempted = False
+        # Set True after `apply_panel_window_styles` runs; like DWM blur,
+        # the native ex-styles only need to be applied once per HWND
+        # lifetime, not on every show.
+        self._panel_styles_applied = False
         # The assistant bubble that is currently being filled by streaming
         # deltas. Set on the first `assistant_partial` of a turn, cleared
         # when the final `message_appended` lands (or on error). None
@@ -759,6 +763,15 @@ class MainPanel(QWidget):
             # Arm AFTER the restore so the move() above doesn't trigger a
             # save with stale data.
             self._position_save_armed = True
+        if not self._panel_styles_applied:
+            self._panel_styles_applied = True
+            # Apply WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW BEFORE the DWM
+            # backdrop call below — DWM composition behavior can depend
+            # on the window's ex-styles, so set them first.
+            try:
+                apply_panel_window_styles(int(self.winId()))
+            except Exception:
+                log.exception("apply_panel_window_styles raised")
         if not self._dwm_backdrop_attempted:
             self._dwm_backdrop_attempted = True
             try:
