@@ -102,8 +102,10 @@ def _build_tray_icon(
     def on_open_settings(_icon, _item):
         _invoke_on_qt_thread(panel, "open_settings")
 
-    def on_cancel(_icon, _item):
-        _invoke_on_qt_thread(manager, "cancel")
+    def on_toggle_companion(_icon, _item):
+        # Marshal onto the Qt thread — toggle_enabled is decorated
+        # @pyqtSlot so invokeMethod can find it by name.
+        _invoke_on_qt_thread(manager, "toggle_enabled")
 
     def on_quit(icon, _item):
         # Stop the tray loop first so it doesn't try to call back into us
@@ -112,9 +114,17 @@ def _build_tray_icon(
         QMetaObject.invokeMethod(qt_app, "quit", Qt.ConnectionType.QueuedConnection)
 
     menu = pystray.Menu(
-        pystray.MenuItem("Open HeyBuddy", on_open_panel, default=True),
-        pystray.MenuItem("Settings...", on_open_settings),
-        pystray.MenuItem("Cancel current turn", on_cancel),
+        pystray.MenuItem("Open", on_open_panel, default=True),
+        # Checkable item — the check mark reflects manager.is_enabled at
+        # the moment the menu opens. Clicking it flips the state via
+        # toggle_enabled. Acts as a kill switch for the push-to-talk
+        # hotkey (e.g. mute during a meeting without quitting).
+        pystray.MenuItem(
+            "Toggle Companion",
+            on_toggle_companion,
+            checked=lambda _item: manager.is_enabled,
+        ),
+        pystray.MenuItem("Settings", on_open_settings),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit", on_quit),
     )

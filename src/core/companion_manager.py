@@ -96,6 +96,11 @@ class CompanionManager(QObject):
         self._state = CompanionState.IDLE
         self._history: list[Message] = []
         self._state_lock = threading.Lock()
+        # Kill switch toggled from the tray menu's "Toggle Companion" item.
+        # When False, `begin_listening` short-circuits — the hotkey still
+        # fires on the OS side but the companion ignores it. Tray check
+        # mark reflects this value via a lambda in main.py.
+        self._enabled: bool = True
 
         # Held only while a turn is in flight (LISTENING through RESPONDING).
         self._active_stt_session: AssemblyAIStreamingSession | None = None
@@ -112,8 +117,24 @@ class CompanionManager(QObject):
     def history(self) -> list[Message]:
         return list(self._history)
 
+    @property
+    def is_enabled(self) -> bool:
+        """True if the hotkey can still trigger turns. See `toggle_enabled`."""
+        return self._enabled
+
+    @pyqtSlot()
+    def toggle_enabled(self) -> None:
+        """Flip the kill switch. Marshaled from the tray thread via Qt."""
+        self._enabled = not self._enabled
+        log.info("Companion %s", "enabled" if self._enabled else "disabled")
+
     def begin_listening(self) -> None:
         """Hotkey press handler. Cheap; safe to call from the hook thread."""
+        # Kill-switch check first — if disabled, do nothing, not even a
+        # state transition. The hotkey is effectively muted.
+        if not self._enabled:
+            log.debug("begin_listening ignored: companion is disabled")
+            return
         with self._state_lock:
             if self._state != CompanionState.IDLE:
                 log.debug("begin_listening ignored in state %s", self._state.value)

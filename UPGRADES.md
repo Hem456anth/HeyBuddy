@@ -25,7 +25,7 @@ commit updates `CLAUDE.md`.
 - [x] Transient mode fade in/out
 
 ## Etc
-- [ ] Tray menu: Open, Toggle Companion, Settings, Quit
+- [x] Tray menu: Open, Toggle Companion, Settings, Quit
 - [ ] Tray icon changes per state
 - [ ] Settings: model, voice_id, hotkey capture, mic picker, test mic
 - [ ] Settings persist + apply live
