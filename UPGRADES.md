@@ -26,7 +26,7 @@ commit updates `CLAUDE.md`.
 
 ## Etc
 - [x] Tray menu: Open, Toggle Companion, Settings, Quit
-- [ ] Tray icon changes per state
+- [x] Tray icon changes per state
 - [ ] Settings: model, voice_id, hotkey capture, mic picker, test mic
 - [ ] Settings persist + apply live
 - [ ] Start/stop chimes + TTS-playing indicator

@@ -40,10 +40,11 @@ from src.api.cloudflare_proxy import CloudflareProxy
 from src.api.elevenlabs_client import ElevenLabsClient
 from src.core.audio_player import AudioPlayer
 from src.core.audio_recorder import AudioRecorder
-from src.core.companion_manager import CompanionManager
+from src.core.companion_manager import CompanionManager, CompanionState
 from src.core.hotkey_monitor import HotkeyMonitor
 from src.core.screen_capture import ScreenCapture
 from src.models.config import AppConfig
+from src.ui import theme
 from src.ui.main_window import MainPanel
 from src.ui.overlay_window import CursorOverlay
 from src.utils.constants import APP_NAME, ASSETS_DIR
@@ -58,15 +59,36 @@ log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _load_tray_image() -> Image.Image:
-    """Use `assets/tray.png` if present; otherwise draw a placeholder dot."""
-    candidate_path = ASSETS_DIR / "tray.png"
-    if candidate_path.exists():
-        return Image.open(candidate_path)
-    placeholder = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    drawer = ImageDraw.Draw(placeholder)
-    drawer.ellipse((8, 8, 56, 56), fill=(46, 144, 250, 255))
-    return placeholder
+# Maps CompanionState to the theme color the tray icon should render in.
+# Mirrors `_STATE_LABELS` in main_window.py so the tray dot and the panel's
+# status row always agree on what each state looks like.
+_STATE_TO_TRAY_COLOR_HEX: dict[CompanionState, str] = {
+    CompanionState.IDLE:       theme.Color.STATE_IDLE,
+    CompanionState.LISTENING:  theme.Color.STATE_LISTENING,
+    CompanionState.PROCESSING: theme.Color.STATE_PROCESSING,
+    CompanionState.RESPONDING: theme.Color.STATE_RESPONDING,
+    CompanionState.ERROR:      theme.Color.STATE_ERROR,
+}
+
+
+def _build_tray_image_for_color(color_hex: str) -> Image.Image:
+    """Render a 64x64 RGBA tray icon: a filled circle in the given color.
+
+    Cycle 17 rewrites the tray icon per state instead of using a static
+    asset, so the tray dot mirrors the panel's status row at a glance.
+    The `assets/tray.png` override that the original `_load_tray_image`
+    supported is dropped here — a static asset can't change color per
+    state. Users who want a custom asset can extend this helper to
+    composite a state-colored badge onto the asset; out of scope for
+    cycle 17.
+    """
+    image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    drawer = ImageDraw.Draw(image)
+    r = int(color_hex[1:3], 16)
+    g = int(color_hex[3:5], 16)
+    b = int(color_hex[5:7], 16)
+    drawer.ellipse((8, 8, 56, 56), fill=(r, g, b, 255))
+    return image
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +152,12 @@ def _build_tray_icon(
     )
     icon = pystray.Icon(
         name=APP_NAME,
-        icon=_load_tray_image(),
+        # Initial icon = IDLE color. Will be re-rendered per state by
+        # the state_changed handler in main() once the manager exists
+        # and the signal is connected.
+        icon=_build_tray_image_for_color(
+            _STATE_TO_TRAY_COLOR_HEX[CompanionState.IDLE],
+        ),
         title=APP_NAME,
         menu=menu,
     )
@@ -199,6 +226,24 @@ def main() -> int:
     panel.hotkey_monitor = hotkey
 
     tray_icon = _build_tray_icon(panel, manager, qt_app)
+
+    # Re-render the tray icon on every state transition so it mirrors the
+    # panel's status row at a glance. The handler reads from
+    # _STATE_TO_TRAY_COLOR_HEX (same theme tokens as `_StatusRow`) so a
+    # future re-theme moves both indicators together. pystray accepts
+    # `icon.icon = <PIL.Image>` from any thread — its internal queue
+    # marshals the redraw onto the tray loop.
+    def _on_state_changed_repaint_tray(state: CompanionState) -> None:
+        color_hex = _STATE_TO_TRAY_COLOR_HEX.get(
+            state, theme.Color.STATE_IDLE,
+        )
+        try:
+            tray_icon.icon = _build_tray_image_for_color(color_hex)
+        except Exception:
+            log.exception("Failed to update tray icon for state %s", state.value)
+
+    manager.state_changed.connect(_on_state_changed_repaint_tray)
+
     # `run_detached` returns immediately and runs the tray loop on its own
     # thread, which is what we want when sharing the process with Qt.
     tray_thread = threading.Thread(
