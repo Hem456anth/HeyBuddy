@@ -396,8 +396,17 @@ class SettingsPanel(QDialog):
 
     # ----- save -----
     def _save(self) -> None:
-        self.config.worker_url = self.worker_url.text().strip()
-        self.config.model = self.model.currentText().strip()
+        # Track changes for the worker_url / model fields so the live
+        # hot-swap branch at the bottom of _save knows whether to
+        # bother poking CompanionManager's proxy / claude objects.
+        new_worker_url = self.worker_url.text().strip()
+        worker_url_changed = new_worker_url != self.config.worker_url
+        self.config.worker_url = new_worker_url
+
+        new_model = self.model.currentText().strip()
+        model_changed = new_model != self.config.model
+        self.config.model = new_model
+
         self.config.voice_id = self.voice_id.text().strip()
         new_hotkey = self.hotkey.currentData() or "ctrl+alt"
         hotkey_changed = new_hotkey != self.config.hotkey
@@ -456,6 +465,26 @@ class SettingsPanel(QDialog):
                     recorder.set_input_device(new_mic_index)
                 except Exception:
                     log.exception("Failed to hot-swap recorder input device")
+
+        # Hot-swap the API clients so the next /chat and /tts requests
+        # use the new Worker URL / model without a restart. Same chain
+        # as the recorder/mic hot-swap (panel → manager → client).
+        # In-flight HTTP requests aren't redirected — they finish
+        # against the URL/model they were issued with.
+        if worker_url_changed or model_changed:
+            owning_panel = self.parent()
+            manager = getattr(owning_panel, "manager", None)
+            if manager is not None:
+                if worker_url_changed:
+                    try:
+                        manager.proxy.apply_worker_url(new_worker_url)
+                    except Exception:
+                        log.exception("Failed to hot-swap Worker URL")
+                if model_changed:
+                    try:
+                        manager.claude.apply_model(new_model)
+                    except Exception:
+                        log.exception("Failed to hot-swap Claude model")
 
         self.settings_saved.emit(self.config)
         self.accept()

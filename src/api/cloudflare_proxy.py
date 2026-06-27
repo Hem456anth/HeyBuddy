@@ -41,15 +41,28 @@ class CloudflareProxy:
     """Single transport for all Worker-mediated endpoints."""
 
     def __init__(self, base_url: str, timeout: float = 60.0) -> None:
-        # Normalize a missing scheme. Users often paste the bare hostname
-        # (e.g. `name.workers.dev`); without a scheme `requests` raises
-        # `MissingSchema`. Cloudflare Workers always speak HTTPS.
-        normalized = base_url.strip()
+        self.timeout = timeout
+        self._session = requests.Session()
+        # base_url normalization is shared with the runtime setter so
+        # users get the same "auto-add https://" treatment whether they
+        # type the URL into settings.json or into the Settings dialog.
+        self.base_url = ""
+        self.apply_worker_url(base_url)
+
+    def apply_worker_url(self, new_base_url: str) -> None:
+        """Swap the Worker base URL at runtime; re-applies normalization.
+
+        Used by the Settings dialog to hot-swap the URL without
+        restarting the app. The next /chat, /tts, or /transcribe-token
+        request immediately uses the new URL. Existing in-flight HTTP
+        requests on the underlying session aren't redirected — they
+        finish against the URL they were issued with.
+        """
+        normalized = (new_base_url or "").strip()
         if normalized and "://" not in normalized:
             normalized = f"https://{normalized}"
         self.base_url = normalized.rstrip("/")
-        self.timeout = timeout
-        self._session = requests.Session()
+        log.info("Worker URL set to %s", self.base_url or "(empty)")
 
     # ---- /chat ----
     def chat(self, payload: dict[str, Any], stream: bool = False) -> requests.Response:

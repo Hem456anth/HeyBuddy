@@ -33,5 +33,5 @@ commit updates `CLAUDE.md`.
   - [x] mic picker (cycle 18)
   - [x] hotkey capture (cycle 19)
   - [x] voice_id (cycle 20 — informational; Worker contract unchanged)
-- [ ] Settings persist + apply live
+- [x] Settings persist + apply live
 - [ ] Start/stop chimes + TTS-playing indicator

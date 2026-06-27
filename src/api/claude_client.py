@@ -30,6 +30,20 @@ class ClaudeClient:
         self.system_prompt = system_prompt
         self.max_tokens = max_tokens
 
+    def apply_model(self, new_model: str) -> None:
+        """Hot-swap the model used for subsequent /chat requests.
+
+        Settings dialog calls this after the user picks a different
+        Claude model from the dropdown so the change takes effect on
+        the next turn without restarting the app. In-flight streams
+        finish on the previous model — there's no way to retarget a
+        running SSE stream without canceling and re-issuing.
+        """
+        cleaned = (new_model or "").strip()
+        if cleaned and cleaned != self.model:
+            log.info("Claude model: %s -> %s", self.model, cleaned)
+            self.model = cleaned
+
     def send(self, history: Iterable[Message], screenshot: bytes | None = None) -> Message:
         """Send a turn synchronously; return the assistant Message."""
         payload = self._build_payload(history, screenshot)
