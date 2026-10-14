@@ -85,7 +85,7 @@ def check_microphone(sample_rate: int = 16_000, duration_seconds: float = 0.4) -
 # ---------------------------------------------------------------------------
 
 
-def ping_worker(worker_url: str, timeout_seconds: float = 5.0) -> DiagnosticResult:
+def ping_worker(worker_url: str, timeout_seconds: float = 5.0, shared_secret: str = "") -> DiagnosticResult:
     """POST `/transcribe-token` and check we get a usable JSON token back.
 
     We pick `/transcribe-token` because it's the cheapest round-trip that
@@ -106,7 +106,8 @@ def ping_worker(worker_url: str, timeout_seconds: float = 5.0) -> DiagnosticResu
     url = f"{normalized.rstrip('/')}{WORKER_TRANSCRIBE_TOKEN_PATH}"
     start = time.time()
     try:
-        response = requests.post(url, json={}, timeout=timeout_seconds)
+        headers = {"X-HeyBuddy-Key": shared_secret.strip()} if shared_secret.strip() else {}
+        response = requests.post(url, json={}, headers=headers, timeout=timeout_seconds)
     except requests.RequestException as net_error:
         return DiagnosticResult(
             ok=False,

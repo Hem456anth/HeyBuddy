@@ -62,7 +62,7 @@ from ..core.companion_manager import CompanionManager, CompanionState
 from ..models.config import AppConfig
 from ..models.message import Message, Role
 from ..utils.logger import get_logger
-from ..utils.win32 import apply_blur_behind, apply_panel_window_styles
+from ..utils.win32 import apply_blur_behind, apply_panel_window_styles, exclude_window_from_capture
 from . import theme
 from .settings_panel import SettingsPanel
 
@@ -363,6 +363,10 @@ class MainPanel(QWidget):
         # inner QFrame and leave the outer widget transparent so the blur
         # bleeds through the margin instead of being clipped.
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # Appearing (on launch, after an error) must never steal focus from
+        # the app the user is working in; clicking into the panel still
+        # activates it normally so the text box can be typed into.
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
         self.config = config
         self.manager = manager
@@ -668,22 +672,16 @@ class MainPanel(QWidget):
         self._scroll_chat_to_bottom()
 
     @pyqtSlot(str)
-    def _on_assistant_partial(self, delta: str) -> None:
-        """One Claude SSE text delta arrived. Append it to the live bubble.
-
-        Empty deltas are quietly dropped (Anthropic occasionally emits
-        zero-text content_block_delta events for whitespace boundaries).
-        """
-        if not delta:
+    def _on_assistant_partial(self, spoken_text_so_far: str) -> None:
+        """Claude's reply so far (POINT tags already hidden). Cumulative,
+        not a delta, so a half-streamed `[POINT:12` never flashes on screen."""
+        if not spoken_text_so_far:
             return
         if self._in_progress_assistant_bubble is None:
-            # First chunk of this turn — materialize the bubble now and
-            # store the reference so subsequent deltas can append in place.
             bubble = self._make_chat_bubble("", Role.ASSISTANT)
             self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
             self._in_progress_assistant_bubble = bubble
-        bubble = self._in_progress_assistant_bubble
-        bubble.setText(bubble.text() + delta)
+        self._in_progress_assistant_bubble.setText(spoken_text_so_far)
         self._scroll_chat_to_bottom()
 
     def _make_chat_bubble(self, text: str, role: Role) -> QLabel:
@@ -775,6 +773,9 @@ class MainPanel(QWidget):
             # on the window's ex-styles, so set them first.
             try:
                 apply_panel_window_styles(int(self.winId()))
+                # Keep the panel (and the conversation in it) out of the
+                # screenshots sent to Claude, as Clicky does.
+                exclude_window_from_capture(int(self.winId()))
             except Exception:
                 log.exception("apply_panel_window_styles raised")
         if not self._dwm_backdrop_attempted:

@@ -1,25 +1,23 @@
 """Central state machine that orchestrates the push-to-talk loop.
 
-States:
+Port of Clicky's `CompanionManager`:
 
-    IDLE -> LISTENING -> PROCESSING -> RESPONDING -> IDLE
+    IDLE --press--> LISTENING --release--> PROCESSING --audio starts--> RESPONDING --audio ends--> IDLE
 
-Phase 2 wiring (this file's responsibility):
+* Press: open an AssemblyAI realtime session and start the mic; PCM blocks
+  stream into the websocket while the hotkey is held.
+* Release: finalize the transcript, capture *all* monitors, stream Claude's
+  reply, resolve `[POINT:...]` tags against the screenshots that produced
+  them, start TTS, and send the resolved points to the cursor overlay.
+* Pressing the hotkey again while HeyBuddy is thinking or talking
+  interrupts it (Clicky cancels `currentResponseTask` the same way). Each
+  turn carries a generation number; work from a superseded generation is
+  dropped silently instead of racing the new turn.
+* Pressing another key while the chord is held (Ctrl+Alt+Del, an AltGr
+  character) cancels the recording instead of sending it.
 
-* On hotkey press → transition to LISTENING. Open an AssemblyAI streaming
-  session (token from /transcribe-token, websocket to streaming.assemblyai.com)
-  and start the recorder. The recorder pushes each PCM block into the
-  websocket via `set_chunk_listener`.
-* On hotkey release → transition to PROCESSING. Stop the recorder, ask the
-  AssemblyAI session to flush a final turn, capture a screenshot, then stream
-  Claude's reply via SSE (parsing POINT tags out of the accumulated text).
-* Transition to RESPONDING. Synthesize TTS through the Worker, play it back,
-  and queue the parsed POINT markers into the cursor overlay (one bezier
-  flight per marker, sequentially).
-* When playback finishes → IDLE.
-
-Threading: every network call lives on a one-off `TurnPipeline` thread so the
-Qt event loop never blocks. UI updates flow back through `pyqtSignal`s.
+Threading: network and capture work runs on short-lived worker threads.
+Everything the UI needs is emitted as a Qt signal (queued to the UI thread).
 """
 from __future__ import annotations
 
@@ -28,7 +26,6 @@ import time
 import wave
 from enum import Enum
 from pathlib import Path
-from typing import Iterable
 
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
@@ -37,8 +34,8 @@ from ..api.claude_client import ClaudeClient
 from ..api.cloudflare_proxy import CloudflareProxy
 from ..api.elevenlabs_client import ElevenLabsClient
 from ..models.config import AppConfig
-from ..models.message import Message, PointMarker, Role
-from ..utils.constants import PROJECT_ROOT
+from ..models.message import CapturedScreen, Message, PointMarker, Role
+from ..utils.constants import RECORDINGS_DIR
 from ..utils.logger import get_logger
 from .audio_player import AudioPlayer
 from .audio_recorder import AudioRecorder
@@ -55,24 +52,49 @@ class CompanionState(str, Enum):
     ERROR = "error"
 
 
+def resolve_point_markers(
+    markers: list[PointMarker],
+    screens: list[CapturedScreen],
+) -> list[PointMarker]:
+    """Attach physical desktop coordinates to each marker.
+
+    `screenN` picks the Nth image of this turn; a missing or out-of-range
+    screen number means the cursor's screen (Clicky's fallback).
+    """
+    if not screens:
+        return []
+    cursor_screen = next((screen for screen in screens if screen.is_cursor_screen), screens[0])
+    resolved: list[PointMarker] = []
+    for marker in markers:
+        target_screen = cursor_screen
+        if marker.screen_index is not None and 1 <= marker.screen_index <= len(screens):
+            target_screen = screens[marker.screen_index - 1]
+        physical_x, physical_y = target_screen.image_point_to_physical(marker.x, marker.y)
+        resolved.append(PointMarker(
+            x=marker.x,
+            y=marker.y,
+            label=marker.label,
+            screen_index=target_screen.screen_number,
+            physical_x=physical_x,
+            physical_y=physical_y,
+        ))
+    return resolved
+
+
 class CompanionManager(QObject):
     """Owns the state machine + all the moving pieces."""
 
     # ---- Qt signals (UI listens to these) ----
     state_changed = pyqtSignal(object)            # CompanionState
     message_appended = pyqtSignal(object)         # Message
-    assistant_partial = pyqtSignal(str)           # text delta during streaming
-    transcription_partial = pyqtSignal(str)       # partial STT text
-    transcription_final = pyqtSignal(str)         # final STT text
-    point_received = pyqtSignal(object)           # PointMarker
+    assistant_partial = pyqtSignal(str)           # spoken text so far (tags hidden)
+    transcription_partial = pyqtSignal(str)       # live STT text
+    transcription_final = pyqtSignal(str)
+    point_received = pyqtSignal(object)           # PointMarker (back-compat, one per tag)
+    pointing_requested = pyqtSignal(object)       # list[PointMarker], resolved
+    turn_interrupted = pyqtSignal()               # overlay should abandon pointing
     error_occurred = pyqtSignal(str)
-    # Per-block mic RMS (0.0..1.0) while LISTENING. Emitted from the audio
-    # thread; Qt's queued-connection mechanism marshals it to the UI thread
-    # for the waveform meter widget. No signal is emitted outside LISTENING.
-    audio_level_changed = pyqtSignal(float)
-
-    # Recordings dropped here so operators can sanity-check Phase 1+2 audio.
-    RECORDINGS_DIR = PROJECT_ROOT / "recordings"
+    audio_level_changed = pyqtSignal(float)       # mic RMS 0..1 while LISTENING
 
     def __init__(
         self,
@@ -94,18 +116,13 @@ class CompanionManager(QObject):
         self.player = player
 
         self._state = CompanionState.IDLE
+        self._state_lock = threading.RLock()
+        # Completed exchanges only (user, assistant, user, assistant, ...),
+        # so an interrupted turn never leaves two user messages in a row.
         self._history: list[Message] = []
-        self._state_lock = threading.Lock()
-        # Kill switch toggled from the tray menu's "Toggle Companion" item.
-        # When False, `begin_listening` short-circuits — the hotkey still
-        # fires on the OS side but the companion ignores it. Tray check
-        # mark reflects this value via a lambda in main.py.
         self._enabled: bool = True
-
-        # Held only while a turn is in flight (LISTENING through RESPONDING).
+        self._turn_generation = 0
         self._active_stt_session: AssemblyAIStreamingSession | None = None
-        # Accumulator for transcription_partial updates so the panel can
-        # show "...what the user said so far".
         self._latest_partial_transcript: str = ""
 
     # ---- public API ----
@@ -119,232 +136,288 @@ class CompanionManager(QObject):
 
     @property
     def is_enabled(self) -> bool:
-        """True if the hotkey can still trigger turns. See `toggle_enabled`."""
         return self._enabled
 
     @pyqtSlot()
     def toggle_enabled(self) -> None:
-        """Flip the kill switch. Marshaled from the tray thread via Qt."""
         self._enabled = not self._enabled
         log.info("Companion %s", "enabled" if self._enabled else "disabled")
+        if not self._enabled:
+            self.cancel()
+
+    @pyqtSlot()
+    def clear_history(self) -> None:
+        self._history.clear()
+        log.info("Conversation history cleared")
 
     def begin_listening(self) -> None:
-        """Hotkey press handler. Cheap; safe to call from the hook thread."""
-        # Kill-switch check first — if disabled, do nothing, not even a
-        # state transition. The hotkey is effectively muted.
+        """Hotkey press. Called on the hook thread, so it must stay cheap."""
         if not self._enabled:
-            log.debug("begin_listening ignored: companion is disabled")
             return
         with self._state_lock:
-            if self._state != CompanionState.IDLE:
-                log.debug("begin_listening ignored in state %s", self._state.value)
+            if self._state == CompanionState.LISTENING:
                 return
+            if self._state in (CompanionState.PROCESSING, CompanionState.RESPONDING):
+                log.info("Interrupting %s turn for a new question", self._state.value)
+                self._interrupt_current_turn_locked()
+            self._turn_generation += 1
+            generation = self._turn_generation
             self._set_state_locked(CompanionState.LISTENING)
-        # The websocket connect and first PCM block can both take a moment;
-        # move both off the hook thread so the OS doesn't think the hook is
-        # hung (the keyboard hook has a hard time limit).
         threading.Thread(
             target=self._open_stt_and_start_recording,
+            args=(generation,),
             name="StartCapture",
             daemon=True,
         ).start()
 
     def end_listening_and_process(self) -> None:
-        """Hotkey release handler. Runs the post-capture pipeline off the UI thread."""
+        """Hotkey release."""
         with self._state_lock:
             if self._state != CompanionState.LISTENING:
-                # Release without matching press; cancel any stray recording.
-                self.recorder.cancel()
                 return
+            generation = self._turn_generation
             self._set_state_locked(CompanionState.PROCESSING)
         threading.Thread(
-            target=self._process_turn,
+            target=self._finish_capture_and_respond,
+            args=(generation,),
             name="TurnPipeline",
             daemon=True,
         ).start()
 
+    def cancel_listening(self) -> None:
+        """Another key was pressed with the chord: the user meant a shortcut."""
+        with self._state_lock:
+            if self._state != CompanionState.LISTENING:
+                return
+            self._turn_generation += 1
+            log.info("Push-to-talk cancelled (another key pressed with the chord)")
+            self._teardown_capture()
+            self._set_state_locked(CompanionState.IDLE)
+
     @pyqtSlot()
     def cancel(self) -> None:
         """Abort whatever is in flight and return to IDLE."""
-        try:
-            self.recorder.cancel()
-            self.player.stop()
-            stt = self._active_stt_session
-            self._active_stt_session = None
-            if stt is not None:
-                try:
-                    stt.stop(final_wait_seconds=0.1)
-                except Exception:
-                    log.exception("Error stopping STT session during cancel")
-        finally:
-            with self._state_lock:
-                self._set_state_locked(CompanionState.IDLE)
+        with self._state_lock:
+            self._turn_generation += 1
+            self._interrupt_current_turn_locked()
+            self._teardown_capture()
+            self._set_state_locked(CompanionState.IDLE)
 
     def send_text(self, text: str, include_screenshot: bool | None = None) -> None:
-        """Send a typed turn directly to Claude (bypasses voice).
-
-        Useful for testing without speaking and for the panel's text box. Runs
-        the same PROCESSING → RESPONDING transitions as the voice path.
-        """
+        """Typed turn from the panel; same pipeline as voice, minus STT."""
+        cleaned_text = (text or "").strip()
+        if not cleaned_text:
+            return
         if include_screenshot is None:
             include_screenshot = self.config.screen_capture_enabled
+        with self._state_lock:
+            if self._state == CompanionState.LISTENING:
+                return
+            if self._state in (CompanionState.PROCESSING, CompanionState.RESPONDING):
+                self._interrupt_current_turn_locked()
+            self._turn_generation += 1
+            generation = self._turn_generation
+            self._set_state_locked(CompanionState.PROCESSING)
         threading.Thread(
-            target=self._send_text_turn,
-            args=(text, include_screenshot),
+            target=self._respond_to_user_text,
+            args=(generation, cleaned_text, include_screenshot),
             name="TypedTurn",
             daemon=True,
         ).start()
 
     # ---- capture path ----
-    def _open_stt_and_start_recording(self) -> None:
-        """Start the STT session, then the recorder.
-
-        Order matters: if the WS fails we want to know *before* we start
-        capturing PCM (otherwise the user records into a black hole). On
-        WS failure we fall back to buffered audio + post-hoc transcription
-        (Phase 3 will add a batch fallback; Phase 2 surfaces the error).
-        """
+    def _open_stt_and_start_recording(self, generation: int) -> None:
         self._latest_partial_transcript = ""
-        try:
-            session = AssemblyAIStreamingSession(
-                proxy=self.proxy,
-                sample_rate=self.config.audio.sample_rate,
-                on_partial=self._on_stt_partial,
-                on_final=self._on_stt_final,
-                on_error=lambda msg: self._fail(f"Transcription: {msg}"),
-            )
-            session.start()
-        except Exception as stt_open_error:
-            self._fail(f"Could not open transcription session: {stt_open_error}")
-            return
-        self._active_stt_session = session
-        # Push every captured block straight into the websocket.
-        self.recorder.set_chunk_listener(session.feed_pcm)
-        # Also drive the panel's waveform meter from the same audio thread.
-        # The signal emit hop marshals onto the UI thread for free.
+        session = AssemblyAIStreamingSession(
+            proxy=self.proxy,
+            sample_rate=self.config.audio.sample_rate,
+            speech_model=self.config.transcription.speech_model,
+            on_partial=lambda text: self._on_stt_partial(generation, text),
+            on_error=lambda message: self._fail(generation, f"Transcription: {message}"),
+        )
+        # Start the mic FIRST and buffer, so the first words aren't lost while
+        # the token + websocket handshake (~300-800 ms) is in flight. Buffered
+        # audio is flushed into the socket as soon as it opens.
+        pending_audio_chunks: list[bytes] = []
+        pending_lock = threading.Lock()
+        socket_ready = threading.Event()
+
+        def forward_or_buffer(pcm_chunk: bytes) -> None:
+            if socket_ready.is_set():
+                session.feed_pcm(pcm_chunk)
+                return
+            with pending_lock:
+                if socket_ready.is_set():
+                    session.feed_pcm(pcm_chunk)
+                else:
+                    pending_audio_chunks.append(pcm_chunk)
+
+        self.recorder.set_chunk_listener(forward_or_buffer)
         self.recorder.set_level_listener(self.audio_level_changed.emit)
         try:
             self.recorder.start()
         except Exception as recorder_error:
-            # Tear the WS back down so we don't leak a token.
-            session.stop(final_wait_seconds=0.1)
-            self._active_stt_session = None
             self.recorder.set_chunk_listener(None)
             self.recorder.set_level_listener(None)
-            self._fail(f"Microphone error: {recorder_error}")
+            self._fail(generation, f"Microphone error: {recorder_error}")
+            return
 
-    def _process_turn(self) -> None:
-        """End-of-recording pipeline.
+        try:
+            session.start()
+        except Exception as stt_open_error:
+            self._fail(generation, f"Could not start transcription: {stt_open_error}")
+            return
 
-        Stop the recorder + WS, persist a wav, capture a screenshot, stream
-        Claude's reply, then move to RESPONDING for TTS + cursor pointing.
-        """
+        with self._state_lock:
+            if generation != self._turn_generation:
+                session.cancel()
+                return
+            self._active_stt_session = session
+        with pending_lock:
+            for buffered_chunk in pending_audio_chunks:
+                session.feed_pcm(buffered_chunk)
+            pending_audio_chunks.clear()
+            socket_ready.set()
+
+    def _finish_capture_and_respond(self, generation: int) -> None:
         pcm_bytes = self.recorder.stop()
         self.recorder.set_chunk_listener(None)
         self.recorder.set_level_listener(None)
-        session = self._active_stt_session
-        self._active_stt_session = None
+        # The user can release before the websocket finished opening; give
+        # the opener a moment to publish the session.
+        deadline = time.monotonic() + 3.0
+        while self._active_stt_session is None and time.monotonic() < deadline:
+            if generation != self._turn_generation or self._state != CompanionState.PROCESSING:
+                return
+            time.sleep(0.05)
+        with self._state_lock:
+            session = self._active_stt_session
+            self._active_stt_session = None
+
         final_transcript = ""
         if session is not None:
             try:
-                final_transcript = session.stop(final_wait_seconds=2.0)
+                final_transcript = session.stop()
             except Exception:
                 log.exception("Error finalizing STT session")
-                final_transcript = self._latest_partial_transcript
-
-        # Fall back to the last partial if the final never arrived.
         if not final_transcript:
             final_transcript = self._latest_partial_transcript
+        final_transcript = (final_transcript or "").strip()
 
-        # Always persist the wav — invaluable for debugging "Claude responded
-        # to nothing" cases.
-        if pcm_bytes:
+        if pcm_bytes and self.config.save_recordings:
             try:
                 self._persist_recording(pcm_bytes)
             except Exception:
                 log.exception("Failed to persist recording (continuing)")
 
-        final_transcript = (final_transcript or "").strip()
+        if generation != self._turn_generation:
+            return
         if not final_transcript:
-            log.info("No transcript; returning to IDLE")
-            self._set_state(CompanionState.IDLE)
+            log.info("No speech detected; back to IDLE")
+            self._set_state_if_current(generation, CompanionState.IDLE)
             return
         self.transcription_final.emit(final_transcript)
-        self._send_text_turn(
-            final_transcript,
-            include_screenshot=self.config.screen_capture_enabled,
-        )
+        self._respond_to_user_text(generation, final_transcript, self.config.screen_capture_enabled)
 
     # ---- response path ----
-    def _send_text_turn(self, text: str, include_screenshot: bool) -> None:
-        # Append the user turn to history + UI before doing any network so the
-        # panel updates immediately.
+    def _respond_to_user_text(self, generation: int, text: str, include_screenshot: bool) -> None:
         user_message = Message(role=Role.USER, content=text)
-        self._history.append(user_message)
         self.message_appended.emit(user_message)
+        self._set_state_if_current(generation, CompanionState.PROCESSING)
 
-        screenshot_bytes: bytes | None = None
+        captured_screens: list[CapturedScreen] = []
         if include_screenshot:
             try:
-                screenshot_bytes = self.screen.capture_at_cursor().png_bytes
+                captured_screens = self.screen.capture_all_screens()
             except Exception:
-                log.exception("Screen capture failed; sending without image")
+                log.exception("Screen capture failed; asking without screenshots")
 
-        # Make sure we're in PROCESSING even when called via send_text() which
-        # bypasses _process_turn.
-        self._set_state(CompanionState.PROCESSING)
+        def is_current_turn() -> bool:
+            return generation == self._turn_generation
 
         try:
-            reply: Message = self.claude.stream_full_reply(
-                self._history,
-                screenshot=screenshot_bytes,
-                on_partial=self.assistant_partial.emit,
+            reply = self.claude.stream_full_reply(
+                self._history + [user_message],
+                screens=captured_screens,
+                on_partial=lambda spoken_so_far: (
+                    self.assistant_partial.emit(spoken_so_far) if is_current_turn() else None
+                ),
+                should_continue=is_current_turn,
             )
         except Exception as claude_error:
-            self._fail(f"Claude request failed: {claude_error}")
+            self._fail(generation, f"Claude request failed: {claude_error}")
+            return
+        if not is_current_turn():
             return
 
-        self._history.append(reply)
+        reply.points = resolve_point_markers(reply.points, captured_screens)
+        self._history.extend([user_message, reply])
         self.message_appended.emit(reply)
-
-        # Fire pointing markers into the overlay queue *before* TTS so the dot
-        # starts flying as Claude starts speaking. The overlay queue handles
-        # sequencing between multiple points.
-        for marker in reply.points:
-            self.point_received.emit(marker)
+        log.info(
+            "Reply: %d chars, %d point(s)%s", len(reply.content), len(reply.points),
+            " (explicit none)" if reply.explicitly_no_point else "",
+        )
 
         if self.config.tts_enabled and reply.content.strip():
-            self._set_state(CompanionState.RESPONDING)
             try:
                 mp3_bytes = self.tts.synthesize(reply.content)
             except Exception as tts_error:
                 log.exception("TTS synthesis failed")
-                self._fail(f"TTS failed: {tts_error}")
+                # The answer is still on screen and the cursor can still point;
+                # a voice failure shouldn't throw the whole turn away.
+                self.error_occurred.emit(f"Voice unavailable: {tts_error}")
+                self._emit_pointing(reply.points)
+                self._set_state_if_current(generation, CompanionState.IDLE)
                 return
-            # When playback finishes, the player calls back into us; jump
-            # back to IDLE there rather than here so RESPONDING actually
-            # reflects the speaking window.
+            if not is_current_turn():
+                return
+
+            def on_audio_started() -> None:
+                if is_current_turn():
+                    self._set_state_if_current(generation, CompanionState.RESPONDING)
+                    # Fly while the buddy talks, like Clicky.
+                    self._emit_pointing(reply.points)
+
             self.player.play_mp3(
                 mp3_bytes,
-                on_finished=lambda: self._set_state(CompanionState.IDLE),
+                on_started=on_audio_started,
+                on_finished=lambda: self._set_state_if_current(generation, CompanionState.IDLE),
             )
         else:
-            self._set_state(CompanionState.IDLE)
+            self._emit_pointing(reply.points)
+            self._set_state_if_current(generation, CompanionState.IDLE)
+
+    def _emit_pointing(self, markers: list[PointMarker]) -> None:
+        if not markers:
+            return
+        self.pointing_requested.emit(list(markers))
+        for marker in markers:
+            self.point_received.emit(marker)
 
     # ---- STT callbacks (reader thread) -----
-    def _on_stt_partial(self, partial: str) -> None:
+    def _on_stt_partial(self, generation: int, partial: str) -> None:
+        if generation != self._turn_generation:
+            return
         self._latest_partial_transcript = partial
         self.transcription_partial.emit(partial)
 
-    def _on_stt_final(self, final_text: str) -> None:
-        # Stash the final but don't transition here — `_process_turn` owns the
-        # PROCESSING/RESPONDING transitions so the ordering stays single-source.
-        self._latest_partial_transcript = final_text
-
     # ---- helpers -----
+    def _interrupt_current_turn_locked(self) -> None:
+        self.player.stop()
+        self.turn_interrupted.emit()
+
+    def _teardown_capture(self) -> None:
+        self.recorder.cancel()
+        self.recorder.set_chunk_listener(None)
+        self.recorder.set_level_listener(None)
+        session = self._active_stt_session
+        self._active_stt_session = None
+        if session is not None:
+            threading.Thread(target=session.cancel, name="SttCancel", daemon=True).start()
+
     def _persist_recording(self, pcm_bytes: bytes) -> Path:
-        self.RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
-        filename = self.RECORDINGS_DIR / f"{int(time.time())}.wav"
+        RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+        filename = RECORDINGS_DIR / f"{int(time.time())}.wav"
         with wave.open(str(filename), "wb") as wav_file:
             wav_file.setnchannels(self.config.audio.channels)
             wav_file.setsampwidth(2)
@@ -352,6 +425,11 @@ class CompanionManager(QObject):
             wav_file.writeframes(pcm_bytes)
         log.info("Recording persisted to %s", filename)
         return filename
+
+    def _set_state_if_current(self, generation: int, new_state: CompanionState) -> None:
+        with self._state_lock:
+            if generation == self._turn_generation:
+                self._set_state_locked(new_state)
 
     def _set_state(self, new_state: CompanionState) -> None:
         with self._state_lock:
@@ -364,19 +442,13 @@ class CompanionManager(QObject):
         self._state = new_state
         self.state_changed.emit(new_state)
 
-    def _fail(self, message: str) -> None:
-        log.error(message)
+    def _fail(self, generation: int, message: str) -> None:
+        with self._state_lock:
+            if generation != self._turn_generation:
+                log.debug("Ignoring error from superseded turn: %s", message)
+                return
+            log.error(message)
+            self._teardown_capture()
+            self._set_state_locked(CompanionState.ERROR)
+            self._set_state_locked(CompanionState.IDLE)
         self.error_occurred.emit(message)
-        # Tear down any in-flight side resources so the user can retry cleanly.
-        self.recorder.cancel()
-        self.recorder.set_chunk_listener(None)
-        self.recorder.set_level_listener(None)
-        session = self._active_stt_session
-        self._active_stt_session = None
-        if session is not None:
-            try:
-                session.stop(final_wait_seconds=0.1)
-            except Exception:
-                pass
-        self._set_state(CompanionState.ERROR)
-        self._set_state(CompanionState.IDLE)

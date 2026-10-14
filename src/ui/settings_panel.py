@@ -171,11 +171,14 @@ class SettingsPanel(QDialog):
 
     settings_saved = pyqtSignal(object)  # AppConfig
 
+    # Current Claude API ids (Oct 2026). Sonnet is the default, as in Clicky:
+    # fastest model that still reads UI screenshots reliably. Any other id
+    # saved in settings.json is kept and shown as an extra entry.
     AVAILABLE_MODELS = [
-        "claude-opus-4-7",
-        "claude-opus-4-8",
-        "claude-sonnet-4-6",
-        "claude-haiku-4-5-20251001",
+        "claude-sonnet-5-5",
+        "claude-opus-5-5",
+        "claude-haiku-5-5",
+        "claude-fable-5-1",
     ]
 
     HOTKEY_LABELS = {
@@ -287,6 +290,22 @@ class SettingsPanel(QDialog):
         self.transient_mode.setChecked(config.transient_cursor_mode)
         form.addRow(self.transient_mode)
 
+        self.show_cursor_buddy = QCheckBox("Show the blue buddy next to my cursor all the time")
+        self.show_cursor_buddy.setToolTip(
+            "Off = the buddy only fades in while you talk to it (Clicky's 'Show Clicky' toggle)."
+        )
+        self.show_cursor_buddy.setChecked(config.show_cursor_buddy)
+        form.addRow(self.show_cursor_buddy)
+
+        self.save_recordings = QCheckBox("Keep a .wav of each question (debugging, off = private)")
+        self.save_recordings.setChecked(config.save_recordings)
+        form.addRow(self.save_recordings)
+
+        self.worker_shared_secret = QLineEdit(config.worker_shared_secret)
+        self.worker_shared_secret.setEchoMode(QLineEdit.EchoMode.Password)
+        self.worker_shared_secret.setPlaceholderText("optional - must match the Worker's APP_SHARED_SECRET")
+        form.addRow("Worker access key", self.worker_shared_secret)
+
         self.autostart = QCheckBox("Launch HeyBuddy at Windows sign-in")
         # Trust the registry, not the persisted config, on dialog open — the
         # user may have toggled it from outside the app.
@@ -348,7 +367,7 @@ class SettingsPanel(QDialog):
         self._set_status("Pinging Worker...", ok=True)
         # Use the *current text*, not the persisted config — the user may be
         # mid-edit when they want to test.
-        result = ping_worker(self.worker_url.text())
+        result = ping_worker(self.worker_url.text(), shared_secret=self.worker_shared_secret.text())
         self._set_status(f"{result.title}: {result.detail}", ok=result.ok)
 
     def _test_microphone(self) -> None:
@@ -414,6 +433,11 @@ class SettingsPanel(QDialog):
         self.config.tts_enabled = self.tts_enabled.isChecked()
         self.config.screen_capture_enabled = self.screen_enabled.isChecked()
         self.config.transient_cursor_mode = self.transient_mode.isChecked()
+        self.config.show_cursor_buddy = self.show_cursor_buddy.isChecked()
+        self.config.save_recordings = self.save_recordings.isChecked()
+        new_shared_secret = self.worker_shared_secret.text().strip()
+        shared_secret_changed = new_shared_secret != self.config.worker_shared_secret
+        self.config.worker_shared_secret = new_shared_secret
         # Mic picker: currentData() returns None for "System default" or
         # an int for a real device. Track whether it changed so we only
         # poke the live recorder when needed.
@@ -471,10 +495,15 @@ class SettingsPanel(QDialog):
         # as the recorder/mic hot-swap (panel → manager → client).
         # In-flight HTTP requests aren't redirected — they finish
         # against the URL/model they were issued with.
-        if worker_url_changed or model_changed:
+        if worker_url_changed or model_changed or shared_secret_changed:
             owning_panel = self.parent()
             manager = getattr(owning_panel, "manager", None)
             if manager is not None:
+                if shared_secret_changed:
+                    try:
+                        manager.proxy.apply_shared_secret(new_shared_secret)
+                    except Exception:
+                        log.exception("Failed to apply Worker access key")
                 if worker_url_changed:
                     try:
                         manager.proxy.apply_worker_url(new_worker_url)

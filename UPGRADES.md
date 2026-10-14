@@ -1,37 +1,33 @@
-# HeyBuddy Upgrades
+# HeyBuddy changelog
 
-Tracked task list for the rolling upgrade loop. One task per cycle. Source
-of truth for architecture, file layout, and conventions remains
-[`CLAUDE.md`](CLAUDE.md). When a task here changes architecture, the same
-commit updates `CLAUDE.md`.
+## 0.2.0 — Clicky-faithful Windows port
 
-## GUI
-- [x] ui/theme.py: color, radius, spacing tokens
-- [x] Frameless panel: rounded corners, shadow, draggable, remembers position
-- [x] DWM blur-behind translucent background
-- [x] Status row bound to state (dot + label + pulse)
-- [x] Mic level waveform meter while listening
-- [x] Streaming reply area fills token-by-token
-- [x] Hover states + pointer cursor on all buttons
-- [x] Panel non-activating (WS_EX_NOACTIVATE + WS_EX_TOOLWINDOW)
+Correctness
+- Pointing now lands on target on HiDPI and multi-monitor setups: screenshots
+  are ≤1280 px and labeled with their size, coordinates are mapped from
+  image pixels to physical pixels, cursor screen is screen 1.
+- All monitors are sent to Claude, not just the cursor's.
+- `[POINT:none]` is no longer spoken aloud; labels and screen numbers are optional.
+- Pausing mid-question no longer drops the start of the sentence (turns are
+  assembled by `turn_order`; release sends `ForceEndpoint`).
+- First words are no longer lost (mic starts before the STT socket and buffers).
+- Non-ASCII replies are no longer garbled (SSE forced to UTF-8).
+- Settings/logs survive in the .exe (`%APPDATA%\HeyBuddy`; the one-file bundle
+  dir is temporary).
+- No console window flashes when speaking; works on Python 3.13 (pydub/audioop removed).
+- Autostart from source works (Run key used a relative `-m` path).
+- The panel's text box can be typed into.
 
-## Cursor overlay
-- [x] Overlay click-through + non-activating flags verified
-- [x] Glowing blue dot + halo + comet trail
-- [x] Idle breathing animation
-- [x] Bezier-arc flight from POINT tags, ease-in-out
-- [x] Per-monitor DPI coordinate mapping
-- [x] Arrival ripple + label caption fade
-- [x] Transient mode fade in/out
+Clicky parity
+- Blue triangle buddy follows the mouse; waveform while listening, spinner
+  while thinking; bezier flight with tangent rotation and scale pulse;
+  typed label bubble; return flight cancelled by mouse movement; multiple
+  points visited in order; transient mode fade.
+- Clicky's speech-first system prompt (adapted to Windows); 10-exchange memory.
+- Hotkey interrupts an answer in progress; other keys with the chord cancel.
+- Own windows excluded from screen capture.
 
-## Etc
-- [x] Tray menu: Open, Toggle Companion, Settings, Quit
-- [x] Tray icon changes per state
-- [x] Settings: model, voice_id, hotkey capture, mic picker, test mic
-  - [x] model (done in earlier work)
-  - [x] test mic (done in earlier work)
-  - [x] mic picker (cycle 18)
-  - [x] hotkey capture (cycle 19)
-  - [x] voice_id (cycle 20 — informational; Worker contract unchanged)
-- [x] Settings persist + apply live
-- [x] Start/stop chimes + TTS-playing indicator
+Security / ops
+- Recordings off by default. Optional Worker access key, model allowlist,
+  token cap and size limits. Single-instance guard.
+- `--selfcheck`, 30+ tests, GitHub Actions build that self-checks the exe.

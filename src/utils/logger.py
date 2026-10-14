@@ -30,10 +30,12 @@ def _configure_root() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    console = logging.StreamHandler(sys.stdout)
-    console.setLevel(logging.INFO)
-    console.setFormatter(fmt)
-    root.addHandler(console)
+    # The windowed (console=False) .exe has no stdout at all.
+    if sys.stdout is not None:
+        console = logging.StreamHandler(sys.stdout)
+        console.setLevel(logging.INFO)
+        console.setFormatter(fmt)
+        root.addHandler(console)
 
     file_handler = RotatingFileHandler(
         LOGS_DIR / "heybuddy.log",

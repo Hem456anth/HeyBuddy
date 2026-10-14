@@ -1,0 +1,83 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main, windows-port-v2]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Unit + integration tests
+        run: python -m pytest -q
+
+      - name: Self-check from source (real Win32 + real screen)
+        shell: pwsh
+        run: |
+          $env:HEYBUDDY_HOME = "$PWD\selfcheck-source"
+          python -m src.main --selfcheck --selfcheck-seconds=6
+          if ($LASTEXITCODE -ne 0) { Get-Content selfcheck-source\selfcheck\selfcheck.json; exit 1 }
+
+      - name: Build HeyBuddy.exe
+        run: pyinstaller --noconfirm heybuddy.spec
+
+      - name: Self-check the built exe
+        shell: pwsh
+        run: |
+          $env:HEYBUDDY_HOME = "$PWD\selfcheck-exe"
+          $process = Start-Process -FilePath dist\HeyBuddy.exe -ArgumentList "--selfcheck","--selfcheck-seconds=6" -PassThru -Wait
+          Get-Content selfcheck-exe\selfcheck\selfcheck.json
+          if ($process.ExitCode -ne 0) { exit 1 }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item dist\HeyBuddy.exe release\
+          Copy-Item README.md, SECURITY.md, LICENSE -Destination release\ -ErrorAction SilentlyContinue
+          Compress-Archive -Path release\* -DestinationPath HeyBuddy-windows-x64.zip -Force
+          (Get-FileHash dist\HeyBuddy.exe -Algorithm SHA256).Hash | Out-File HeyBuddy.exe.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HeyBuddy-windows-x64
+          path: |
+            HeyBuddy-windows-x64.zip
+            HeyBuddy.exe.sha256
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selfcheck-evidence
+          path: |
+            selfcheck-source/selfcheck/**
+            selfcheck-exe/selfcheck/**
+            selfcheck-*/logs/**
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            HeyBuddy-windows-x64.zip
+            HeyBuddy.exe.sha256

@@ -1,15 +1,20 @@
 {
   "worker_url": "https://your-worker.workers.dev",
   "hotkey": "ctrl+alt",
-  "model": "claude-sonnet-4-6",
+  "model": "claude-sonnet-5-5",
   "tts_enabled": true,
   "screen_capture_enabled": true,
   "transient_cursor_mode": false,
   "autostart_enabled": false,
+  "voice_id": "",
+  "show_cursor_buddy": true,
+  "save_recordings": false,
+  "worker_shared_secret": "",
   "audio": {
     "sample_rate": 16000,
     "channels": 1,
-    "chunk_size": 1024
+    "chunk_size": 1600,
+    "input_device_index": null
   },
   "ui": {
     "panel_width": 420,
@@ -19,6 +24,7 @@
   },
   "transcription": {
     "provider": "assemblyai",
-    "language": "en"
+    "language": "en",
+    "speech_model": "universal-streaming-english"
   }
 }

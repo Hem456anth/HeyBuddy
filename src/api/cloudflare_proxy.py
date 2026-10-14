@@ -40,9 +40,16 @@ class SSEEvent:
 class CloudflareProxy:
     """Single transport for all Worker-mediated endpoints."""
 
-    def __init__(self, base_url: str, timeout: float = 60.0) -> None:
-        self.timeout = timeout
+    # Header checked by the Worker when its APP_SHARED_SECRET var is set.
+    SHARED_SECRET_HEADER = "X-HeyBuddy-Key"
+
+    def __init__(self, base_url: str, timeout: float = 60.0, shared_secret: str = "") -> None:
+        # (connect, read) — fail fast on a dead Worker URL, but give Claude's
+        # first streamed token / a long TTS clip room to arrive.
+        self.timeout = (8.0, timeout)
         self._session = requests.Session()
+        self._session.headers["User-Agent"] = "HeyBuddy-Windows"
+        self.apply_shared_secret(shared_secret)
         # base_url normalization is shared with the runtime setter so
         # users get the same "auto-add https://" treatment whether they
         # type the URL into settings.json or into the Settings dialog.
@@ -64,8 +71,22 @@ class CloudflareProxy:
         self.base_url = normalized.rstrip("/")
         log.info("Worker URL set to %s", self.base_url or "(empty)")
 
+    def apply_shared_secret(self, shared_secret: str) -> None:
+        cleaned = (shared_secret or "").strip()
+        if cleaned:
+            self._session.headers[self.SHARED_SECRET_HEADER] = cleaned
+        else:
+            self._session.headers.pop(self.SHARED_SECRET_HEADER, None)
+
+    def _require_configured(self) -> None:
+        if not self.base_url or "your-worker" in self.base_url:
+            raise RuntimeError(
+                "Worker URL is not set. Open Settings and paste your Cloudflare Worker URL."
+            )
+
     # ---- /chat ----
     def chat(self, payload: dict[str, Any], stream: bool = False) -> requests.Response:
+        self._require_configured()
         url = f"{self.base_url}{WORKER_CHAT_PATH}"
         log.debug("POST %s stream=%s", url, stream)
         response = self._session.post(url, json=payload, stream=stream, timeout=self.timeout)
@@ -93,6 +114,10 @@ class CloudflareProxy:
         current_event = "message"
         data_lines: list[str] = []
 
+        # Anthropic streams UTF-8 but sends `text/event-stream` without a
+        # charset, which makes requests guess ISO-8859-1 and mangle every
+        # non-ASCII character (Telugu, emoji, curly quotes...). Force UTF-8.
+        response.encoding = "utf-8"
         for raw_line in response.iter_lines(decode_unicode=True):
             # `iter_lines` yields the chunk between newlines without the
             # newline. An empty string therefore signals the end-of-event
@@ -133,6 +158,7 @@ class CloudflareProxy:
         Worker is a pass-through to ElevenLabs and including extra keys would
         leak into the ElevenLabs request body.
         """
+        self._require_configured()
         url = f"{self.base_url}{WORKER_TTS_PATH}"
         log.debug("POST %s (%d chars)", url, len(text))
         resp = self._session.post(
@@ -152,6 +178,7 @@ class CloudflareProxy:
         its handler, so this MUST be a POST even though the route is
         semantically a fetch.
         """
+        self._require_configured()
         url = f"{self.base_url}{WORKER_TRANSCRIBE_TOKEN_PATH}"
         resp = self._session.post(url, json={}, timeout=self.timeout)
         if not resp.ok:

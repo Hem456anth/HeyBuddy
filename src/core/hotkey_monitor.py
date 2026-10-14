@@ -1,13 +1,9 @@
 """Thin facade over `utils.win32.LowLevelKeyboardHook`.
 
 `CompanionManager` doesn't want to know about VK codes or the Win32 message
-pump. It just wants press/release callbacks for the user's configured chord.
-This module is that translation layer.
-
-Hotkey names come from `config.hotkey` (a friendly string like `"ctrl+alt"`)
-and are resolved to a VK chord via `utils.win32.resolve_hotkey_chord`. Phase
-3 added preset support so the Settings panel can change the chord without
-needing a chord-capture UI.
+pump. It just wants press/release/cancel callbacks for the user's chord.
+Hotkey names come from `config.hotkey` and are resolved to a VK chord via
+`utils.win32.resolve_hotkey_chord`.
 """
 from __future__ import annotations
 
@@ -25,14 +21,20 @@ class HotkeyMonitor:
         on_press: Callable[[], None],
         on_release: Callable[[], None],
         chord_name: str = "ctrl+alt",
+        on_cancel: Callable[[], None] | None = None,
     ) -> None:
         self._on_press = on_press
         self._on_release = on_release
+        self._on_cancel = on_cancel
         self._chord_name = chord_name
-        self._hook = LowLevelKeyboardHook(
+        self._hook = self._build_hook(chord_name)
+
+    def _build_hook(self, chord_name: str) -> LowLevelKeyboardHook:
+        return LowLevelKeyboardHook(
             chord_vk_codes=resolve_hotkey_chord(chord_name),
-            on_press=on_press,
-            on_release=on_release,
+            on_press=self._on_press,
+            on_release=self._on_release,
+            on_cancel=self._on_cancel,
         )
 
     def start(self) -> None:
@@ -46,9 +48,5 @@ class HotkeyMonitor:
         """Swap the chord at runtime. Used by the Settings panel."""
         self.stop()
         self._chord_name = chord_name
-        self._hook = LowLevelKeyboardHook(
-            chord_vk_codes=resolve_hotkey_chord(chord_name),
-            on_press=self._on_press,
-            on_release=self._on_release,
-        )
+        self._hook = self._build_hook(chord_name)
         self.start()

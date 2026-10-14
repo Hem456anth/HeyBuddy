@@ -1,49 +1,33 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for HeyBuddy.
+"""PyInstaller spec for HeyBuddy (one-file, windowed).
 
-Build:
+Build:  pyinstaller --noconfirm heybuddy.spec   ->  dist/HeyBuddy.exe
 
-    pip install pyinstaller
-    pyinstaller heybuddy.spec
-
-The output lands in `dist/HeyBuddy.exe` (one-file build, no console window).
-
-Why a spec file and not a CLI invocation:
-
-* `sounddevice` ships a private PortAudio DLL that PyInstaller's hook usually
-  picks up — but only if we point `collect_dynamic_libs` at it explicitly.
-* PyQt6's platform plugins (`platforms/qwindows.dll`) are not always picked
-  up by the default hook; `collect_data_files` is a safer bet.
-* `pystray._win32` is a runtime-resolved backend; `hiddenimports` makes sure
-  PyInstaller actually packages it.
-
-If a build is missing a module at runtime, add it to `hiddenimports` here
-rather than monkey-patching the build command.
+* sounddevice ships PortAudio as a private DLL: collect it explicitly.
+* imageio-ffmpeg ships ffmpeg.exe as package data: collect it so spoken
+  replies can be decoded on machines without ffmpeg.
+* pystray picks its Win32 backend at runtime: hidden import.
+* config/settings.json is bundled as the first-run template; the live
+  settings are written to %APPDATA%\\HeyBuddy (never inside the bundle).
 """
+from pathlib import Path
+
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
-block_cipher = None
-
 hiddenimports = [
-    # pystray's platform backend is selected at runtime
     "pystray._win32",
-    # websocket-client's transport submodules
     "websocket._abnf",
     "websocket._app",
     "websocket._core",
-    # sounddevice resolves the PortAudio binding lazily
-    "sounddevice",
     "_sounddevice",
-    # pydub's MP3 decoder pulls audioop
-    "audioop",
+    "src.tools.selfcheck",
 ]
 
-datas = []
-datas += collect_data_files("PyQt6", includes=["Qt6/plugins/platforms/*"])
+datas = [("config/settings.json", "config"), ("assets", "assets")]
 datas += collect_data_files("sounddevice")
+datas += collect_data_files("imageio_ffmpeg")
 
-binaries = []
-binaries += collect_dynamic_libs("sounddevice")
+binaries = collect_dynamic_libs("sounddevice")
 
 a = Analysis(
     ["src/main.py"],
@@ -52,20 +36,11 @@ a = Analysis(
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
-    hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-        # Heavyweight stdlib bits we don't need; trimming saves ~10 MB.
-        "tkinter",
-        "test",
-        "unittest",
-    ],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
+    excludes=["tkinter", "unittest", "pytest", "PyQt6.QtWebEngineCore", "PyQt6.Qt3DCore"],
     noarchive=False,
 )
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data)
 exe = EXE(
     pyz,
     a.scripts,
@@ -77,14 +52,10 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,            # UPX-compressed PyQt6 DLLs occasionally fail to load
-    upx_exclude=[],
+    upx=False,            # UPX-compressed Qt DLLs sometimes fail to load
     runtime_tmpdir=None,
-    console=False,        # GUI app — no console window
+    console=False,        # tray app: no console window
     disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon="assets/tray.ico" if __import__("pathlib").Path("assets/tray.ico").exists() else None,
+    icon="assets/heybuddy.ico" if Path("assets/heybuddy.ico").exists() else None,
+    version="version_info.txt" if Path("version_info.txt").exists() else None,
 )

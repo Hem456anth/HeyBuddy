@@ -1,121 +1,149 @@
-"""Playback for ElevenLabs MP3 responses (used in Phase 2).
+"""Playback for ElevenLabs MP3 responses.
 
-The recorder is on `sounddevice`; the player matches. pydub handles MP3 -> PCM
-decoding so we don't pull `simpleaudio` (needs a C toolchain) or `playsound`
-(flaky on Windows). The decoded `AudioSegment` gives us raw PCM that
-sounddevice plays via `sd.play`.
+MP3 -> PCM decoding shells out to the static ffmpeg binary that the
+`imageio-ffmpeg` wheel ships, so users never install ffmpeg themselves.
 
-ffmpeg discovery: pydub shells out to `ffmpeg` on PATH to decode MP3. Rather
-than make the user install ffmpeg system-wide, we depend on `imageio-ffmpeg`
-which ships a static ffmpeg binary inside the venv via pip. At import time
-we point `AudioSegment.converter` at that binary so playback works
-out-of-the-box on a fresh venv with no PATH manipulation. If
-`imageio-ffmpeg` isn't installed we fall back silently to whatever's on
-PATH (pydub's default behavior), so the module is still importable in
-environments that have ffmpeg installed system-wide.
+Why not pydub (what the first port used):
+
+* pydub imports `audioop`, which was removed from the standard library in
+  Python 3.13, so the app could not even start on a current Python.
+* pydub launches ffmpeg without `CREATE_NO_WINDOW`; inside the windowed
+  (no-console) .exe every spoken reply flashed a black console window.
+
+Playback uses a private `sounddevice.OutputStream` instead of the global
+`sd.play()` so a start/stop chime can never cut the spoken reply off (both
+used to share sounddevice's single implicit stream).
 """
 from __future__ import annotations
 
-import io
+import shutil
+import subprocess
+import sys
 import threading
-import warnings
+from typing import Callable
 
 import numpy as np
 import sounddevice as sd
-
-# pydub emits a RuntimeWarning at import time when it can't find ffmpeg on
-# PATH. We DO find ffmpeg — via the imageio-ffmpeg bundle — but that
-# discovery happens AFTER pydub finishes importing, so the warning fires
-# every launch even though it's not actually true. Suppress it at the
-# narrowest possible scope (this one import) rather than globally.
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=RuntimeWarning, module="pydub")
-    from pydub import AudioSegment
 
 from ..utils.logger import get_logger
 
 log = get_logger(__name__)
 
+# Decode target: mono 24 kHz PCM16 is plenty for speech and keeps buffers small.
+PLAYBACK_SAMPLE_RATE = 24_000
+_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
-def _configure_pydub_ffmpeg() -> None:
-    """Point pydub at the imageio-ffmpeg static binary if available.
 
-    Called once at module import. Idempotent — re-running is harmless.
-    """
+def resolve_ffmpeg_executable() -> str | None:
+    """Bundled imageio-ffmpeg binary first, then whatever is on PATH."""
     try:
         import imageio_ffmpeg
-        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+        return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
-        log.debug(
-            "imageio-ffmpeg not available; pydub will look for ffmpeg on PATH"
+        log.debug("imageio-ffmpeg unavailable; looking for ffmpeg on PATH")
+    return shutil.which("ffmpeg")
+
+
+def decode_mp3_to_pcm16(mp3_bytes: bytes, sample_rate: int = PLAYBACK_SAMPLE_RATE) -> np.ndarray:
+    """Decode MP3 bytes into a mono int16 numpy array."""
+    ffmpeg_executable = resolve_ffmpeg_executable()
+    if not ffmpeg_executable:
+        raise RuntimeError("ffmpeg not found (install imageio-ffmpeg)")
+    completed = subprocess.run(
+        [
+            ffmpeg_executable, "-hide_banner", "-loglevel", "error",
+            "-i", "pipe:0",
+            "-f", "s16le", "-acodec", "pcm_s16le",
+            "-ac", "1", "-ar", str(sample_rate),
+            "pipe:1",
+        ],
+        input=mp3_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=_CREATE_NO_WINDOW,
+        timeout=30,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg failed to decode TTS audio: {completed.stderr.decode(errors='replace')[:300]}"
         )
-        return
-    AudioSegment.converter = ffmpeg_path
-    # pydub also uses ffprobe for some operations; ffprobe ships in the same
-    # imageio-ffmpeg bundle on most platforms but the package exposes only
-    # ffmpeg. We leave ffprobe alone — pydub falls back to ffmpeg for the
-    # probe operations we actually use (mp3 -> raw PCM).
-    log.info("pydub configured to use bundled ffmpeg: %s", ffmpeg_path)
-
-
-_configure_pydub_ffmpeg()
+    return np.frombuffer(completed.stdout, dtype=np.int16)
 
 
 class AudioPlayer:
+    """Plays one clip at a time; `stop()` cuts it off immediately."""
+
     def __init__(self) -> None:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
-        self._on_finished_callback = None
+        self._is_playing = False
 
-    def play_mp3(self, mp3_bytes: bytes, on_finished=None) -> None:
+    @property
+    def is_playing(self) -> bool:
+        return self._is_playing
+
+    def play_mp3(self, mp3_bytes: bytes, on_finished: Callable[[], None] | None = None,
+                 on_started: Callable[[], None] | None = None) -> None:
         """Decode and play MP3 bytes on a background thread."""
+        self.stop()
         if not mp3_bytes:
             if on_finished:
                 on_finished()
             return
-        self.stop()
-        self._on_finished_callback = on_finished
-        self._stop_event.clear()
+        self._stop_event = threading.Event()
         self._thread = threading.Thread(
             target=self._play_worker,
-            args=(mp3_bytes,),
+            args=(mp3_bytes, self._stop_event, on_started, on_finished),
             name="AudioPlayer",
             daemon=True,
         )
         self._thread.start()
 
     def stop(self) -> None:
-        if self._thread and self._thread.is_alive():
-            self._stop_event.set()
-            try:
-                sd.stop()
-            except Exception:
-                # `sd.stop` raises if no stream is active; that's fine here.
-                pass
-            self._thread.join(timeout=1.0)
+        self._stop_event.set()
+        worker = self._thread
+        if worker and worker.is_alive() and worker is not threading.current_thread():
+            worker.join(timeout=1.5)
         self._thread = None
 
-    def _play_worker(self, mp3_bytes: bytes) -> None:
+    def _play_worker(
+        self,
+        mp3_bytes: bytes,
+        stop_event: threading.Event,
+        on_started: Callable[[], None] | None,
+        on_finished: Callable[[], None] | None,
+    ) -> None:
+        was_stopped = False
         try:
-            decoded = AudioSegment.from_file(io.BytesIO(mp3_bytes), format="mp3")
-            decoded = decoded.set_sample_width(2)   # 16-bit PCM
-            samples = np.frombuffer(decoded.raw_data, dtype=np.int16)
-            if decoded.channels > 1:
-                samples = samples.reshape(-1, decoded.channels)
-            sd.play(samples, samplerate=decoded.frame_rate)
-            # `sd.wait` blocks until the buffer drains; we poll the stop flag
-            # in slices so cancellation is responsive.
-            while sd.get_stream().active and not self._stop_event.is_set():
-                sd.sleep(50)
-            if self._stop_event.is_set():
-                sd.stop()
-        except Exception:
-            log.exception("AudioPlayer crashed")
-        finally:
-            callback = self._on_finished_callback
-            self._on_finished_callback = None
-            if callback:
+            samples = decode_mp3_to_pcm16(mp3_bytes)
+            if stop_event.is_set():
+                was_stopped = True
+                return
+            self._is_playing = True
+            if on_started:
                 try:
-                    callback()
+                    on_started()
+                except Exception:
+                    log.exception("AudioPlayer on_started callback raised")
+            block_frames = 1024
+            with sd.OutputStream(
+                samplerate=PLAYBACK_SAMPLE_RATE, channels=1, dtype="int16",
+                blocksize=block_frames,
+            ) as output_stream:
+                for block_start in range(0, len(samples), block_frames):
+                    if stop_event.is_set():
+                        was_stopped = True
+                        break
+                    output_stream.write(samples[block_start:block_start + block_frames])
+        except Exception:
+            log.exception("AudioPlayer failed")
+        finally:
+            self._is_playing = False
+            # A stopped clip was superseded on purpose; whoever stopped it owns
+            # the next state transition, so don't fire on_finished.
+            if on_finished and not was_stopped:
+                try:
+                    on_finished()
                 except Exception:
                     log.exception("AudioPlayer on_finished callback raised")

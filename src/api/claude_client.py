@@ -1,18 +1,33 @@
-"""High-level Claude chat client built on top of the Cloudflare proxy."""
+"""High-level Claude chat client built on top of the Cloudflare proxy.
+
+Ports Clicky's `ClaudeAPI.analyzeImageStreaming` + `parsePointingCoordinates`:
+
+* every turn sends ALL monitors as labeled JPEG images, cursor screen first;
+* the previous exchanges are sent as plain text (no old screenshots), capped
+  at `CONVERSATION_HISTORY_MAX_EXCHANGES`;
+* the reply is streamed over SSE and `[POINT:...]` tags are parsed out of
+  the final text so they are never spoken.
+"""
 from __future__ import annotations
 
 import base64
 import json
 import re
-from typing import Iterable
+from typing import Callable, Iterable, Iterator, Sequence
 
-from ..models.message import Message, PointMarker, Role
-from ..utils.constants import DEFAULT_SYSTEM_PROMPT, POINT_TAG_PATTERN
+from ..models.message import CapturedScreen, Message, PointMarker, Role
+from ..utils.constants import (
+    CONVERSATION_HISTORY_MAX_EXCHANGES,
+    DEFAULT_SYSTEM_PROMPT,
+    POINT_TAG_PATTERN,
+)
 from ..utils.logger import get_logger
 from .cloudflare_proxy import CloudflareProxy
 
 log = get_logger(__name__)
 _POINT_RE = re.compile(POINT_TAG_PATTERN)
+# Collapses the double spaces left behind when a tag is removed mid-sentence.
+_WHITESPACE_RUN_RE = re.compile(r"[ \t]{2,}")
 
 
 class ClaudeClient:
@@ -23,107 +38,91 @@ class ClaudeClient:
         proxy: CloudflareProxy,
         model: str,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-        max_tokens: int = 1024,
+        max_tokens: int = 2048,
+        history_max_exchanges: int = CONVERSATION_HISTORY_MAX_EXCHANGES,
     ) -> None:
         self.proxy = proxy
         self.model = model
         self.system_prompt = system_prompt
         self.max_tokens = max_tokens
+        self.history_max_exchanges = history_max_exchanges
 
     def apply_model(self, new_model: str) -> None:
-        """Hot-swap the model used for subsequent /chat requests.
-
-        Settings dialog calls this after the user picks a different
-        Claude model from the dropdown so the change takes effect on
-        the next turn without restarting the app. In-flight streams
-        finish on the previous model — there's no way to retarget a
-        running SSE stream without canceling and re-issuing.
-        """
+        """Hot-swap the model used for subsequent /chat requests."""
         cleaned = (new_model or "").strip()
         if cleaned and cleaned != self.model:
             log.info("Claude model: %s -> %s", self.model, cleaned)
             self.model = cleaned
 
-    def send(self, history: Iterable[Message], screenshot: bytes | None = None) -> Message:
-        """Send a turn synchronously; return the assistant Message."""
-        payload = self._build_payload(history, screenshot)
-        resp = self.proxy.chat(payload, stream=False)
-        resp.raise_for_status()
-        text = self._extract_text(resp.json())
-        return self._build_reply(text)
-
+    # ----- streaming -----
     def send_stream(
         self,
         history: Iterable[Message],
-        screenshot: bytes | None = None,
-    ) -> Iterable[str]:
-        """Yield incremental text deltas as Claude responds via SSE.
-
-        The Worker forwards Anthropic's SSE verbatim, so we see the full
-        Anthropic event taxonomy (`message_start`, `content_block_start`,
-        `content_block_delta`, `content_block_stop`, `message_delta`,
-        `message_stop`, `ping`, `error`). We only care about
-        `content_block_delta` events whose delta is a `text_delta`.
-        """
-        payload = self._build_payload(history, screenshot)
+        screens: Sequence[CapturedScreen] = (),
+    ) -> Iterator[str]:
+        """Yield text deltas as Claude responds via SSE."""
+        payload = self.build_payload(history, screens)
         for sse_event in self.proxy.chat_stream(payload):
-            text = self._extract_text_delta(sse_event.event, sse_event.data)
+            text = self.extract_text_delta(sse_event.event, sse_event.data)
             if text:
                 yield text
 
     def stream_full_reply(
         self,
         history: Iterable[Message],
-        screenshot: bytes | None = None,
-        on_partial: "Iterable[str] | None" = None,  # noqa: F821 — docs only
+        screens: Sequence[CapturedScreen] = (),
+        on_partial: Callable[[str], None] | None = None,
+        should_continue: Callable[[], bool] | None = None,
     ) -> Message:
         """Drive the SSE stream to completion and return the finished Message.
 
-        `on_partial`, if provided as a callable, is invoked with each text
-        delta so the UI can show response text as it arrives. We intentionally
-        accumulate the full text before parsing POINT tags rather than
-        emitting them incrementally — tags arrive as a single delta in
-        practice and partial-tag parsing is brittle.
+        `on_partial` receives the *spoken* text so far (POINT tags hidden) so
+        the panel never flashes raw tags. `should_continue` lets the manager
+        abandon a stream when the user interrupts with a new push-to-talk.
         """
-        from typing import Callable
         chunks: list[str] = []
-        callable_partial: Callable[[str], None] | None = (
-            on_partial if callable(on_partial) else None
-        )
-        for delta in self.send_stream(history, screenshot=screenshot):
+        for delta in self.send_stream(history, screens=screens):
+            if should_continue is not None and not should_continue():
+                log.info("Claude stream abandoned (turn superseded)")
+                break
             chunks.append(delta)
-            if callable_partial is not None:
+            if on_partial is not None:
                 try:
-                    callable_partial(delta)
+                    on_partial(strip_point_tags_for_display("".join(chunks)))
                 except Exception:
                     log.exception("on_partial callback raised")
-        full_text = "".join(chunks)
-        return self._build_reply(full_text)
+        return parse_reply("".join(chunks))
 
     # ----- payload construction -----
-    def _build_payload(
+    def build_payload(
         self,
         history: Iterable[Message],
-        screenshot: bytes | None,
+        screens: Sequence[CapturedScreen] = (),
     ) -> dict:
-        messages = [m.to_api_dict() for m in history if m.role != Role.SYSTEM]
-        if screenshot and messages and messages[-1]["role"] == "user":
-            # Attach image to the latest user turn using Anthropic content blocks
-            last = messages[-1]
-            messages[-1] = {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": base64.b64encode(screenshot).decode("ascii"),
-                        },
+        conversation = [m for m in history if m.role != Role.SYSTEM]
+        # Keep only the last N exchanges (+ the new user turn). Anthropic
+        # requires the first message to be from the user, so trim from the
+        # front until it is.
+        max_messages = self.history_max_exchanges * 2 + 1
+        conversation = conversation[-max_messages:]
+        while conversation and conversation[0].role != Role.USER:
+            conversation = conversation[1:]
+        messages = [m.to_api_dict() for m in conversation]
+
+        if screens and messages and messages[-1]["role"] == "user":
+            content_blocks: list[dict] = []
+            for screen in screens:
+                content_blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": screen.media_type,
+                        "data": base64.b64encode(screen.image_bytes).decode("ascii"),
                     },
-                    {"type": "text", "text": last["content"]},
-                ],
-            }
+                })
+                content_blocks.append({"type": "text", "text": screen.label})
+            content_blocks.append({"type": "text", "text": messages[-1]["content"]})
+            messages[-1] = {"role": "user", "content": content_blocks}
         return {
             "model": self.model,
             "system": self.system_prompt,
@@ -133,63 +132,67 @@ class ClaudeClient:
 
     # ----- response parsing -----
     @staticmethod
-    def _extract_text(payload: dict) -> str:
-        # Anthropic shape: {"content": [{"type":"text","text":"..."}], ...}
-        content = payload.get("content")
-        if isinstance(content, list):
-            return "".join(
-                block.get("text", "")
-                for block in content
-                if isinstance(block, dict) and block.get("type") == "text"
-            )
-        # Fallbacks for proxies that flatten the response
-        return payload.get("text") or payload.get("reply") or ""
+    def extract_text_delta(event_name: str, data_payload: str) -> str:
+        """Pull text from one Anthropic SSE event, or `""` if it has none.
 
-    @staticmethod
-    def _extract_text_delta(event_name: str, data_payload: str) -> str:
-        """Pull text from a single Anthropic SSE event, or `""` if none.
-
-        Anthropic event taxonomy we care about:
-
-        * `content_block_delta` with `delta.type == "text_delta"` → real text
-        * everything else (`ping`, `message_start`, `content_block_start`,
-          `content_block_stop`, `message_delta`, `message_stop`, `error`) →
-          no text to emit at this stage; the caller may track them later.
+        Only `content_block_delta` events whose delta is a `text_delta`
+        carry spoken text. Thinking deltas, pings and lifecycle events are
+        ignored. A stream-level `error` event is raised so the manager can
+        show the real reason (overloaded, credit balance, ...).
         """
         if not data_payload or data_payload == "[DONE]":
             return ""
         try:
             obj = json.loads(data_payload)
         except json.JSONDecodeError:
-            # Some intermediaries strip the JSON shape and pass raw text;
-            # be tolerant rather than dropping the chunk.
-            return data_payload if event_name == "content_block_delta" else ""
+            return ""
         if not isinstance(obj, dict):
             return ""
-        # Surface error events loudly — the upstream client can decide how to
-        # react, but silently swallowing them would mask credential issues.
         if obj.get("type") == "error":
-            log.error("Anthropic stream error event: %s", obj.get("error"))
-            return ""
+            error_info = obj.get("error") or {}
+            message = error_info.get("message") if isinstance(error_info, dict) else str(error_info)
+            raise RuntimeError(f"Claude stream error: {message or error_info}")
         if obj.get("type") == "content_block_delta":
             delta = obj.get("delta") or {}
             if isinstance(delta, dict) and delta.get("type") == "text_delta":
                 return delta.get("text", "") or ""
         return ""
 
-    @staticmethod
-    def _build_reply(text: str) -> Message:
-        points: list[PointMarker] = []
-        for m in _POINT_RE.finditer(text):
-            screen_raw = m.group(4)
-            points.append(
-                PointMarker(
-                    x=int(m.group(1)),
-                    y=int(m.group(2)),
-                    label=m.group(3).strip(),
-                    screen_index=int(screen_raw) if screen_raw else 1,
-                )
-            )
-        # Strip tags so they don't get spoken aloud
-        clean = _POINT_RE.sub("", text).strip()
-        return Message(role=Role.ASSISTANT, content=clean, points=points)
+
+def parse_reply(text: str) -> Message:
+    """Split Claude's raw reply into spoken text + POINT markers."""
+    points: list[PointMarker] = []
+    explicitly_no_point = False
+    for match in _POINT_RE.finditer(text):
+        x_raw, y_raw, label_raw, screen_raw = match.groups()
+        if x_raw is None or y_raw is None:
+            explicitly_no_point = True
+            continue
+        points.append(PointMarker(
+            x=int(x_raw),
+            y=int(y_raw),
+            label=(label_raw or "").strip(),
+            screen_index=int(screen_raw) if screen_raw else None,
+        ))
+    spoken_text = _clean_spoken_text(_POINT_RE.sub("", text))
+    return Message(
+        role=Role.ASSISTANT,
+        content=spoken_text,
+        points=points,
+        explicitly_no_point=explicitly_no_point,
+    )
+
+
+def strip_point_tags_for_display(partial_text: str) -> str:
+    """Hide complete tags AND a half-streamed trailing `[POINT...` fragment."""
+    without_complete_tags = _POINT_RE.sub("", partial_text)
+    fragment_start = without_complete_tags.rfind("[")
+    if fragment_start != -1 and "]" not in without_complete_tags[fragment_start:]:
+        candidate = without_complete_tags[fragment_start:]
+        if "[POINT:".startswith(candidate[:7]) or candidate.startswith("[POINT"):
+            without_complete_tags = without_complete_tags[:fragment_start]
+    return _clean_spoken_text(without_complete_tags)
+
+
+def _clean_spoken_text(text: str) -> str:
+    return _WHITESPACE_RUN_RE.sub(" ", text).strip()

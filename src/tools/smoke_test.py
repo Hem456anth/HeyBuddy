@@ -33,13 +33,12 @@ if __package__ in (None, ""):
 
 from src.core.audio_recorder import AudioRecorder
 from src.core.hotkey_monitor import HotkeyMonitor
-from src.utils.constants import PROJECT_ROOT
+from src.utils.constants import RECORDINGS_DIR
 from src.utils.logger import get_logger
 from src.utils.win32 import enable_per_monitor_dpi_awareness
 
 log = get_logger(__name__)
 
-RECORDINGS_DIR = PROJECT_ROOT / "recordings"
 SAMPLE_RATE = 16_000
 CHANNELS = 1
 

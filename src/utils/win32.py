@@ -200,7 +200,7 @@ _user32.PostThreadMessageW.restype = wintypes.BOOL
 _user32.CallNextHookEx.argtypes = (
     ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM,
 )
-_user32.CallNextHookEx.restype = ctypes.c_long
+_user32.CallNextHookEx.restype = ctypes.c_ssize_t
 # SetWindowsHookExW signature:
 #   HHOOK SetWindowsHookExW(int idHook, HOOKPROC lpfn, HINSTANCE hmod, DWORD)
 # Without argtypes declared, ctypes defaults to `c_int` for every argument
@@ -434,7 +434,12 @@ def apply_panel_window_styles(hwnd: int) -> None:
     Idempotent — safe to call more than once.
     """
     ex_style = _user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-    ex_style |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+    # WS_EX_NOACTIVATE used to be set here too, but it made the panel's
+    # text box impossible to type into. The panel now only avoids taking
+    # focus when it *appears* (Qt's WA_ShowWithoutActivating); a click
+    # activates it like any normal window.
+    ex_style |= WS_EX_TOOLWINDOW
+    ex_style &= ~WS_EX_NOACTIVATE
     _user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style)
 
 
@@ -466,7 +471,7 @@ def logical_to_physical_on_monitor(
 
 # `LowLevelKeyboardProc` signature: LRESULT CALLBACK fn(int code, WPARAM, LPARAM)
 _HookProc = ctypes.WINFUNCTYPE(
-    ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM,
+    ctypes.c_ssize_t, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM,
 )
 
 
@@ -491,6 +496,7 @@ class LowLevelKeyboardHook:
         chord_vk_codes: Iterable[Iterable[int]],
         on_press: Callable[[], None],
         on_release: Callable[[], None],
+        on_cancel: Callable[[], None] | None = None,
     ) -> None:
         # `chord_vk_codes` is an iterable of groups; each group is satisfied by
         # any one VK in it. For Ctrl+Alt we pass [{VK_LCONTROL, VK_RCONTROL},
@@ -499,6 +505,12 @@ class LowLevelKeyboardHook:
         self._chord_groups: list[set[int]] = [set(group) for group in chord_vk_codes]
         self._on_press = on_press
         self._on_release = on_release
+        # Fired (instead of on_release) when another key is pressed while
+        # the chord is held: the user is typing a shortcut such as
+        # Ctrl+Alt+Del or an AltGr character, not talking to the buddy.
+        self._on_cancel = on_cancel
+        self._chord_cancelled = False
+        self._chord_vk_universe: set[int] = set().union(*self._chord_groups) if self._chord_groups else set()
         self._pressed_vks: set[int] = set()
         self._chord_active = False
         self._hook_handle: int | None = None
@@ -587,8 +599,18 @@ class LowLevelKeyboardHook:
         fire = None
         with self._lock:
             self._pressed_vks.add(vk)
-            if not self._chord_active and self._chord_held():
+            if (
+                self._chord_active
+                and not self._chord_cancelled
+                and vk not in self._chord_vk_universe
+                and vk not in _GENERIC_MODIFIER_VKS
+                and self._on_cancel is not None
+            ):
+                self._chord_cancelled = True
+                fire = self._on_cancel
+            elif not self._chord_active and self._chord_held():
                 self._chord_active = True
+                self._chord_cancelled = False
                 fire = self._on_press
         if fire:
             try:
@@ -602,13 +624,19 @@ class LowLevelKeyboardHook:
             self._pressed_vks.discard(vk)
             if self._chord_active and not self._chord_held():
                 self._chord_active = False
-                fire = self._on_release
+                if not self._chord_cancelled:
+                    fire = self._on_release
+                self._chord_cancelled = False
         if fire:
             try:
                 fire()
             except Exception:
                 log.exception("Hotkey on_release handler raised")
 
+
+# Generic (side-less) modifier VKs Windows sometimes reports alongside the
+# sided ones; they must never count as "another key" for cancellation.
+_GENERIC_MODIFIER_VKS = {0x10, 0x11, 0x12}  # VK_SHIFT, VK_CONTROL, VK_MENU
 
 # Named push-to-talk chord presets. The LL hook fires when EVERY group is
 # satisfied by AT LEAST ONE held VK. So "ctrl+alt" means (any Ctrl) AND
@@ -790,8 +818,11 @@ def autostart_command_for_current_process() -> str:
     pythonw = sys.executable
     if pythonw.lower().endswith("python.exe"):
         pythonw = pythonw[: -len("python.exe")] + "pythonw.exe"
-    project_root = str(PROJECT_ROOT_FOR_AUTOSTART)
-    return f'"{pythonw}" -m src.main'
+    # The Run key launches with System32 as the working directory, so
+    # `-m src.main` can't find the package. Point at the script itself;
+    # `src/main.py` puts the repo root on sys.path when run directly.
+    main_script_path = PROJECT_ROOT_FOR_AUTOSTART / "src" / "main.py"
+    return f'"{pythonw}" "{main_script_path}"'
 
 
 # Late import to avoid a circular dependency on constants at module load.
@@ -937,3 +968,81 @@ def apply_blur_behind(hwnd: int) -> str:
 
     log.info("DWM backdrop: none available, chrome stays opaque")
     return "none"
+
+
+# ---------------------------------------------------------------------------
+# Capture exclusion (keep HeyBuddy's own windows out of screenshots)
+# ---------------------------------------------------------------------------
+
+WDA_NONE = 0x00000000
+WDA_EXCLUDEFROMCAPTURE = 0x00000011  # Windows 10 2004+ (build 19041)
+
+if hasattr(_user32, "SetWindowDisplayAffinity"):
+    _user32.SetWindowDisplayAffinity.argtypes = (wintypes.HWND, wintypes.DWORD)
+    _user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
+
+
+def exclude_window_from_capture(hwnd: int) -> bool:
+    """Hide `hwnd` from screenshots/screen recording but not from the user.
+
+    The Windows equivalent of Clicky passing its own windows to the
+    ScreenCaptureKit filter: the blue buddy and the panel never show up in
+    the images sent to Claude, so it can't "point at itself". On builds
+    older than 2004 the call fails and we simply keep going (Claude may then
+    see the buddy in its screenshot, which is harmless).
+    """
+    if not hasattr(_user32, "SetWindowDisplayAffinity"):
+        return False
+    ok = bool(_user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE))
+    if not ok:
+        log.debug("SetWindowDisplayAffinity(EXCLUDEFROMCAPTURE) failed for hwnd=%#x", hwnd)
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Single instance guard
+# ---------------------------------------------------------------------------
+
+ERROR_ALREADY_EXISTS = 183
+# A separate handle with use_last_error=True so ctypes snapshots
+# GetLastError() immediately after the call (the shared windll handle
+# doesn't, and any intervening call could clobber it).
+_kernel32_with_last_error = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32_with_last_error.CreateMutexW.argtypes = (ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR)
+_kernel32_with_last_error.CreateMutexW.restype = wintypes.HANDLE
+_single_instance_mutex_handle = None
+
+
+def acquire_single_instance_lock(name: str = "Local\\HeyBuddySingleInstance") -> bool:
+    """Return False if another HeyBuddy is already running for this user.
+
+    Two copies would install two keyboard hooks and two overlays, and every
+    push-to-talk would start two turns. The mutex handle is kept for the
+    life of the process and released by the OS on exit.
+    """
+    global _single_instance_mutex_handle
+    handle = _kernel32_with_last_error.CreateMutexW(None, False, name)
+    already_running = ctypes.get_last_error() == ERROR_ALREADY_EXISTS
+    _single_instance_mutex_handle = handle
+    return not already_running
+
+
+_user32.GetWindowDisplayAffinity.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+_user32.GetWindowDisplayAffinity.restype = wintypes.BOOL
+
+
+def get_window_ex_style(hwnd: int) -> int:
+    """Raw GWL_EXSTYLE bits (diagnostics / self-check)."""
+    return int(_user32.GetWindowLongW(hwnd, GWL_EXSTYLE)) & 0xFFFFFFFF
+
+
+def get_window_display_affinity(hwnd: int) -> int:
+    """Current SetWindowDisplayAffinity value, or -1 if it can't be read."""
+    affinity = wintypes.DWORD(0)
+    if not _user32.GetWindowDisplayAffinity(hwnd, ctypes.byref(affinity)):
+        return -1
+    return int(affinity.value)
+
+
+def set_window_display_affinity(hwnd: int, affinity: int) -> bool:
+    return bool(_user32.SetWindowDisplayAffinity(hwnd, affinity))

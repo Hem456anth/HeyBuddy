@@ -1,32 +1,29 @@
 @echo off
-REM Build HeyBuddy into a single Windows executable.
-REM Requires the project's virtual environment to be active and
-REM `pip install pyinstaller` to have been run.
-
+REM Build dist\HeyBuddy.exe (one file, no console) and smoke-test it.
 setlocal
 cd /d "%~dp0"
 
 if not exist .venv\Scripts\python.exe (
-    echo No virtualenv found at .venv. Run:
-    echo     python -m venv .venv
-    echo     .venv\Scripts\activate
-    echo     pip install -r requirements-desktop.txt
-    echo     pip install pyinstaller
-    exit /b 1
+    echo Creating virtual environment...
+    py -3.12 -m venv .venv || python -m venv .venv || exit /b 1
 )
-
 call .venv\Scripts\activate.bat
+python -m pip install --upgrade pip >nul
+pip install -r requirements-dev.txt || exit /b 1
 
-REM Clean old artifacts so we never ship stale code.
+echo Running unit tests...
+python -m pytest -q || exit /b 1
+
 if exist build rmdir /s /q build
 if exist dist  rmdir /s /q dist
+pyinstaller --noconfirm heybuddy.spec || (echo Build failed. & exit /b 1)
 
-pyinstaller heybuddy.spec
+echo Running the built exe's self-check (about 10 seconds; the blue buddy will fly once)...
+set HEYBUDDY_HOME=%CD%\build\selfcheck-home
+start /wait "" dist\HeyBuddy.exe --selfcheck
 if errorlevel 1 (
-    echo Build failed.
+    echo Self-check FAILED - see build\selfcheck-home\selfcheck\selfcheck.json
     exit /b 1
 )
-
 echo.
-echo Built dist\HeyBuddy.exe
-echo Run it directly or copy it onto a thumb drive — it is one file.
+echo Built and verified: dist\HeyBuddy.exe
