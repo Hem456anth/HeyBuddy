@@ -46,7 +46,14 @@ jobs:
         run: |
           $env:HEYBUDDY_HOME = "$PWD\selfcheck-exe"
           $process = Start-Process -FilePath dist\HeyBuddy.exe -ArgumentList "--selfcheck","--selfcheck-seconds=6" -PassThru -Wait
-          Get-Content selfcheck-exe\selfcheck\selfcheck.json
+          $report = Get-Content selfcheck-exe\selfcheck\selfcheck.json -Raw | ConvertFrom-Json
+          foreach ($check in $report.checks.PSObject.Properties) {
+            $status = if ($check.Value.passed) { "PASS" } elseif ($check.Value.required) { "FAIL" } else { "WARN" }
+            $detail = ($check.Value.detail | ConvertTo-Json -Compress -Depth 5)
+            if ($detail.Length -gt 300) { $detail = $detail.Substring(0, 300) }
+            $level = if ($status -eq "FAIL") { "error" } else { "notice" }
+            Write-Output "::$level title=selfcheck $($check.Name)::$status $detail"
+          }
           if ($process.ExitCode -ne 0) { exit 1 }
 
       - name: Package
@@ -74,10 +81,29 @@ jobs:
             selfcheck-exe/selfcheck/**
             selfcheck-*/logs/**
 
-      - name: Publish release (tags only)
+      - name: Publish release (tags)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             HeyBuddy-windows-x64.zip
             HeyBuddy.exe.sha256
+
+      - name: Publish preview pre-release (windows-port-v2 branch)
+        if: github.ref == 'refs/heads/windows-port-v2'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.2.0-preview
+          target_commitish: ${{ github.sha }}
+          name: HeyBuddy 0.2.0 preview (Windows x64)
+          prerelease: true
+          body: |
+            Built and self-checked on windows-latest from ${{ github.sha }}.
+            Unzip and run HeyBuddy.exe, then paste your Cloudflare Worker URL in Settings.
+            Unsigned: SmartScreen -> More info -> Run anyway.
+          files: |
+            HeyBuddy-windows-x64.zip
+            HeyBuddy.exe.sha256
+            selfcheck-exe/selfcheck/selfcheck.json
+            selfcheck-exe/selfcheck/buddy_region_visible.png
+            selfcheck-exe/selfcheck/buddy_region_capture_excluded.png
