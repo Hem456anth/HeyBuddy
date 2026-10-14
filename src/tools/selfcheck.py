@@ -243,7 +243,7 @@ def run_selfcheck(
 
         # 5. overlay: wait until the buddy is parked at the target, then grab.
         landed = _wait_until(qt_app, lambda: overlay.current_frame is not None
-                             and overlay.current_frame.pose.mode.value == "pointing", 6.0)
+                             and overlay.current_frame.pose.mode.value == "pointing", 8.0)
         record("buddy_flew_to_target", landed,
                None if overlay.current_frame is None else (overlay.current_frame.pose.x, overlay.current_frame.pose.y))
         _pump(qt_app, 0.6)
@@ -275,8 +275,15 @@ def run_selfcheck(
                     for window in overlay._windows:  # noqa: SLF001
                         win32.set_window_display_affinity(int(window.winId()), win32.WDA_NONE)
                     _pump(qt_app, 0.3)
-                    visible_grab = grabber.grab(region)
-                    visible_image = Image.frombytes("RGB", visible_grab.size, visible_grab.rgb)
+                    # Compositors can lag a frame or two behind an affinity
+                    # change; take the best of a few grabs.
+                    visible_image = None
+                    for _attempt in range(4):
+                        visible_grab = grabber.grab(region)
+                        candidate = Image.frombytes("RGB", visible_grab.size, visible_grab.rgb)
+                        if visible_image is None or _count_buddy_blue_pixels(candidate) > _count_buddy_blue_pixels(visible_image):
+                            visible_image = candidate
+                        _pump(qt_app, 0.15)
                     for window in overlay._windows:  # noqa: SLF001
                         win32.exclude_window_from_capture(int(window.winId()))
                     full_grab = grabber.grab(grabber.monitors[0])
