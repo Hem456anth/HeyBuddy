@@ -36,7 +36,12 @@ jobs:
         run: |
           $env:HEYBUDDY_HOME = "$PWD\selfcheck-source"
           python -m src.main --selfcheck --selfcheck-seconds=6
-          if ($LASTEXITCODE -ne 0) { Get-Content selfcheck-source\selfcheck\selfcheck.json; exit 1 }
+          $selfcheckExit = $LASTEXITCODE
+          if ($selfcheckExit -ne 0) {
+            Get-Content selfcheck-source\logs\heybuddy.log -ErrorAction SilentlyContinue | Select-String -Pattern "\[ERROR\]" | Select-Object -Last 5 | ForEach-Object { Write-Output "::error title=source log::$($_.Line)" }
+          }
+          ./scripts/report-selfcheck.ps1 -ReportPath selfcheck-source\selfcheck\selfcheck.json -Label "source"
+          if ($selfcheckExit -ne 0) { exit 1 }
 
       - name: Build HeyBuddy.exe
         run: pyinstaller --noconfirm heybuddy.spec
@@ -46,14 +51,7 @@ jobs:
         run: |
           $env:HEYBUDDY_HOME = "$PWD\selfcheck-exe"
           $process = Start-Process -FilePath dist\HeyBuddy.exe -ArgumentList "--selfcheck","--selfcheck-seconds=6" -PassThru -Wait
-          $report = Get-Content selfcheck-exe\selfcheck\selfcheck.json -Raw | ConvertFrom-Json
-          foreach ($check in $report.checks.PSObject.Properties) {
-            $status = if ($check.Value.passed) { "PASS" } elseif ($check.Value.required) { "FAIL" } else { "WARN" }
-            $detail = ($check.Value.detail | ConvertTo-Json -Compress -Depth 5)
-            if ($detail.Length -gt 300) { $detail = $detail.Substring(0, 300) }
-            $level = if ($status -eq "FAIL") { "error" } else { "notice" }
-            Write-Output "::$level title=selfcheck $($check.Name)::$status $detail"
-          }
+          ./scripts/report-selfcheck.ps1 -ReportPath selfcheck-exe\selfcheck\selfcheck.json -Label "exe"
           if ($process.ExitCode -ne 0) { exit 1 }
 
       - name: Package
