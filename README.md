@@ -1,17 +1,51 @@
-# HeyBuddy
+<div align="center">
 
-A Windows port of [farzaa/clicky](https://github.com/farzaa/clicky) — an AI
-companion that lives in your system tray, can see your screen, hears your
-voice (push to talk), and animates a blue cursor toward things on screen to
-help you learn.
+# HeyBuddy 👋
+### An AI buddy in your Windows system tray that sees your screen, hears your voice and points at things
 
-> Credits: this project is a Windows reimplementation of @farzaa's macOS
-> [Clicky](https://github.com/farzaa/clicky). The Cloudflare Worker proxy
-> (`/chat`, `/tts`, `/transcribe-token`) is reused unchanged.
+![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
+![PyQt6](https://img.shields.io/badge/PyQt6-41CD52?logo=qt&logoColor=white)
+![Claude](https://img.shields.io/badge/Claude-API-D97757)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Status](https://img.shields.io/badge/status-preview-orange)
 
-## Status
+[**⬇️ Download preview (v0.2.0)**](https://github.com/Hem456anth/HeyBuddy/releases/tag/v0.2.0-preview)
 
-**All three phases complete.** The full pipeline is wired:
+</div>
+
+---
+
+## About this project
+
+HeyBuddy is a **Windows port of [farzaa/clicky](https://github.com/farzaa/clicky)**, a macOS AI companion. I loved the idea and wanted it on my Windows laptop, so I rebuilt it in Python with a lot of AI-assisted ("vibe") coding.
+
+Hold a hotkey, ask a question out loud, and HeyBuddy takes a screenshot, asks Claude, speaks the answer back, and **flies a glowing blue cursor to the thing on screen** it's talking about. That makes it handy for learning new software.
+
+It's a **personal, learning-first project**: it works for me, but it's a preview, not a polished product.
+
+> **Credits:** all credit for the original idea and design goes to [@farzaa](https://github.com/farzaa) and Clicky. HeyBuddy reuses Clicky's Cloudflare Worker proxy (`/chat`, `/tts`, `/transcribe-token`) unchanged.
+
+## Quick look
+
+| Step | What happens |
+|---|---|
+| 1. Hold **Ctrl + Alt** | HeyBuddy starts listening |
+| 2. Ask out loud | "Where's the export button in this app?" |
+| 3. Release | A screenshot plus your question go to Claude |
+| 4. Listen and watch | It answers by voice, and the blue cursor flies to the spot |
+
+## What you need
+
+- Windows 10 or 11 and a microphone
+- Your own API keys: **Anthropic** (Claude), **AssemblyAI** (speech-to-text), **ElevenLabs** (voice)
+- A free **Cloudflare** account to host the Worker that keeps your keys off the desktop app
+
+> ⚠️ The download alone won't talk until you deploy the Worker with your own keys (step 1 below). These APIs are paid or free-tier.
+
+## Features
+
+The full pipeline is wired up:
 
 - pystray tray icon → floating PyQt6 panel
 - Push-to-talk via a Win32 low-level keyboard hook (preset chords)
@@ -27,6 +61,7 @@ help you learn.
 - Diagnostics: Worker reachability ping + microphone level test
 - Windows autostart via registry
 - PyInstaller one-file build (`build.bat`)
+
 
 ---
 
@@ -54,8 +89,8 @@ Note the deployed URL (e.g. `https://heybuddy.your-account.workers.dev`).
 ### 2. Install HeyBuddy (dev / from source)
 
 ```powershell
-git clone <this repo>
-cd heybuddy
+git clone https://github.com/Hem456anth/HeyBuddy.git
+cd HeyBuddy
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements-desktop.txt
@@ -155,6 +190,35 @@ See [`CLAUDE.md`](CLAUDE.md) for the canonical file map and conventions.
 
 ---
 
+
+## Honest status
+
+- ✅ Push-to-talk, transcription, Claude replies, voice output and cursor pointing all work in my testing
+- 🧪 The preview `.exe` is built by GitHub Actions from the `windows-port-v2` branch
+- ⚠️ Tested on my own machines only; expect bugs on other setups
+- ⚠️ You need your own paid or free-tier API keys and a deployed Worker
+
+## Docs
+
+| File | What's inside |
+|---|---|
+| [`CLAUDE.md`](CLAUDE.md) | Architecture, threading model, Worker contract, file map, POINT protocol |
+| [`UPGRADES.md`](UPGRADES.md) | Upgrade checklist (GUI, cursor overlay, settings) |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to report bugs or suggest ideas |
+
+## What I learned building it
+
+- Porting a macOS app's ideas to Windows APIs (low-level keyboard hooks, DPI awareness, click-through overlays)
+- Streaming audio over WebSockets for realtime transcription
+- Streaming Claude replies (SSE) with screenshots
+- Packaging a Python app as a single `.exe` with PyInstaller and CI
+
 ## License
 
-MIT — same spirit as upstream Clicky.
+MIT, in the same spirit as upstream Clicky.
+
+<div align="center">
+
+Made by **[Kundrapu Hemanth](https://www.linkedin.com/in/kundrapu-hemanth)** · still learning, still building
+
+</div>
