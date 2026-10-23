@@ -11,7 +11,7 @@
 # (`cd worker && npx wrangler dev`). Both reference the same source file.
 # Keep them in sync.
 
-name = "heybuddy-proxy"
+name = "heyclicky-proxy"
 main = "worker/src/index.ts"
 compatibility_date = "2024-01-01"
 
