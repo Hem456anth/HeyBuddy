@@ -1,0 +1,242 @@
+name: Android build
+
+on:
+  push:
+    branches: [android-v1]
+    paths-ignore:
+      - "src/**"
+      - "installer/**"
+      - "tests/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_VERSION: "0.1.0"
+  RELEASE_TAG: "android-v0.1.0-preview"
+
+jobs:
+  backend:
+    name: Backend (ruff + pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Ruff
+        run: ruff check .
+      - name: Pytest
+        run: |
+          set +e
+          python -m pytest -q -rfE --junitxml=pytest-junit.xml 2>&1 | tee pytest-output.txt
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^(FAILED|ERROR) " pytest-output.txt | head -30 | sed 's/^/::error title=pytest::/'
+            exit 1
+          fi
+          echo "::notice title=backend::$(tail -n 1 pytest-output.txt)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-test-report
+          path: backend/pytest-junit.xml
+          if-no-files-found: ignore
+
+  android:
+    name: Android (core tests, lint, debug + release APK)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Android SDK platform
+        run: |
+          rm -f local.properties
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          PKG="$("$SDKM" --list 2>/dev/null | grep -oE 'platforms;android-37(\.[0-9]+)?' | sort -u | head -1)"
+          echo "Installing ${PKG:-platforms;android-37} + build-tools 36.0.0"
+          "$SDKM" --install "${PKG:-platforms;android-37}" "build-tools;36.0.0" > /dev/null
+      - name: Generate a throwaway CI signing key (NOT a Play Store key)
+        run: |
+          PW="$(openssl rand -hex 24)"
+          echo "::add-mask::$PW"
+          keytool -genkeypair -noprompt -keystore "$RUNNER_TEMP/heybuddy-preview.jks" -alias heybuddy-preview \
+            -keyalg RSA -keysize 3072 -validity 3650 -storepass "$PW" -keypass "$PW" \
+            -dname "CN=HeyBuddy CI Preview (not a Play key), O=HeyBuddy"
+          echo "HEYBUDDY_KEYSTORE_FILE=$RUNNER_TEMP/heybuddy-preview.jks" >> "$GITHUB_ENV"
+          echo "HEYBUDDY_KEYSTORE_PASSWORD=$PW" >> "$GITHUB_ENV"
+          echo "HEYBUDDY_KEY_ALIAS=heybuddy-preview" >> "$GITHUB_ENV"
+      - name: Build, test, lint
+        run: |
+          set +e
+          ./gradlew --stacktrace --continue :core:test :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest 2>&1 | tee gradle-output.txt
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            grep -E "^e: |error:|FAILED|What went wrong" -A2 gradle-output.txt | head -60 | while IFS= read -r line; do echo "::error title=gradle::$line"; done
+            exit 1
+          fi
+      - name: APK summary
+        run: |
+          for f in app/build/outputs/apk/release/*.apk app/build/outputs/apk/debug/*.apk; do
+            echo "::notice title=apk::$(basename "$f") $(du -h "$f" | cut -f1) sha256=$(sha256sum "$f" | cut -c1-16)…"
+          done
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk | head -3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apks
+          path: |
+            android/app/build/outputs/apk/release/app-release.apk
+            android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/outputs/mapping/release/mapping.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-build-reports
+          path: |
+            android/gradle-output.txt
+            android/core/build/reports/tests/
+            android/core/build/test-results/
+            android/app/build/reports/
+            android/app/build/test-results/
+          if-no-files-found: ignore
+
+  emulator:
+    name: Emulator API ${{ matrix.api }}
+    needs: android
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - api: 26
+            target: google_apis
+          - api: 30
+            target: google_apis
+          - api: 34
+            target: google_apis
+          - api: 35
+            target: google_apis
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: true
+      - name: Android SDK platform
+        working-directory: android
+        run: |
+          rm -f local.properties
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          PKG="$("$SDKM" --list 2>/dev/null | grep -oE 'platforms;android-37(\.[0-9]+)?' | sort -u | head -1)"
+          echo "Installing ${PKG:-platforms;android-37} + build-tools 36.0.0"
+          "$SDKM" --install "${PKG:-platforms;android-37}" "build-tools;36.0.0" > /dev/null
+      - name: Pre-build test APKs (outside the emulator window)
+        working-directory: android
+        run: ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest
+      - name: connectedDebugAndroidTest
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          target: ${{ matrix.target }}
+          arch: x86_64
+          profile: pixel_5
+          disable-animations: true
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          working-directory: android
+          script: ./gradlew :app:connectedDebugAndroidTest --continue || touch ../connected-failed
+      - name: Per-API result
+        if: always()
+        run: |
+          python3 .github/scripts/android_test_summary.py --api ${{ matrix.api }} \
+            --results android/app/build/outputs/androidTest-results/connected \
+            --out emulator-result-${{ matrix.api }}.json
+          if [ -f connected-failed ]; then
+            echo "::error title=API ${{ matrix.api }}::connectedDebugAndroidTest failed (see report artifact)"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: emulator-report-api${{ matrix.api }}
+          path: |
+            emulator-result-${{ matrix.api }}.json
+            android/app/build/reports/androidTests/
+            android/app/build/outputs/androidTest-results/
+          if-no-files-found: ignore
+
+  publish:
+    name: Publish pre-release
+    needs: [backend, android, emulator]
+    if: ${{ always() && needs.backend.result == 'success' && needs.android.result == 'success' && github.ref == 'refs/heads/android-v1' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Assemble release files
+        env:
+          EMULATOR_RESULT: ${{ needs.emulator.result }}
+        run: |
+          mkdir -p release
+          cp artifacts/android-apks/apk/release/app-release.apk "release/HeyBuddy-android-${APP_VERSION}.apk"
+          cp artifacts/android-apks/apk/debug/app-debug.apk "release/HeyBuddy-android-${APP_VERSION}-debug.apk"
+          (cd artifacts && zip -qr "../release/HeyBuddy-android-${APP_VERSION}-test-reports.zip" \
+            android-build-reports backend-test-report emulator-report-api* 2>/dev/null || true)
+          (cd release && sha256sum HeyBuddy-android-* > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          python3 .github/scripts/android_test_summary.py --aggregate artifacts --emulator-job "$EMULATOR_RESULT" \
+            --sha256 release/SHA256SUMS.txt --commit "$GITHUB_SHA" --out release-notes.md
+          cat release-notes.md
+      - name: Replace previous preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete "$RELEASE_TAG" --cleanup-tag -y --repo "$GITHUB_REPOSITORY" || true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: HeyBuddy for Android 0.1.0 preview
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          make_latest: false
+          body_path: release-notes.md
+          files: |
+            release/HeyBuddy-android-0.1.0.apk
+            release/HeyBuddy-android-0.1.0-debug.apk
+            release/HeyBuddy-android-0.1.0-test-reports.zip
+            release/SHA256SUMS.txt
