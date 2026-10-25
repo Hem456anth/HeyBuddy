@@ -29,7 +29,14 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Unit + integration tests
-        run: python -m pytest -q
+        shell: pwsh
+        run: |
+          python -m pytest -q -rfE 2>&1 | Tee-Object -FilePath pytest-output.txt
+          $pytestExit = $LASTEXITCODE
+          if ($pytestExit -ne 0) {
+            Get-Content pytest-output.txt | Select-String -Pattern "^(FAILED|ERROR) |^E  " | Select-Object -First 30 | ForEach-Object { Write-Output "::error title=pytest::$($_.Line)" }
+            exit 1
+          }
 
       - name: Self-check from source (real Win32 + real screen)
         shell: pwsh

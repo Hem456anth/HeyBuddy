@@ -8,6 +8,13 @@ from src.core.tools import ToolContext, ToolError, execute_tool, is_sensitive_pa
 from tests import fake_win32
 
 
+@pytest.fixture(autouse=True)
+def _fake_desktop(monkeypatch):
+    """Never touch the real clipboard/keyboard, even on a Windows runner."""
+    import src.core.tools as tools_module
+    monkeypatch.setattr(tools_module, "win32", fake_win32)
+
+
 def _ctx(tmp_path, answer=True, **kwargs):
     asked = []
 

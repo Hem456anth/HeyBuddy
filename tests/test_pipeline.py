@@ -106,9 +106,15 @@ def test_missing_worker_url_gives_friendly_error():
     assert manager.state == CompanionState.IDLE
 
 
-def test_buddy_program_turn_with_tool_and_memory(tmp_path):
+def test_buddy_program_turn_with_tool_and_memory(tmp_path, monkeypatch):
+    import src.core.companion_manager as manager_module
+    import src.core.tools as tools_module
     from src.core.memory_store import MemoryStore
     from src.tools.selfcheck import _has_tool_result
+    from tests import fake_win32
+
+    monkeypatch.setattr(manager_module, "win32", fake_win32)
+    monkeypatch.setattr(tools_module, "win32", fake_win32)
 
     app = QApplication.instance() or QApplication([])
 
