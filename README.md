@@ -17,6 +17,28 @@ clean-room from a reverse-engineering study
 > Credits: a Windows reimplementation of @farzaa's macOS Clicky (MIT). The
 > Cloudflare Worker is wire-compatible with upstream.
 
+## HeyBuddy for Android (preview)
+
+Branch `android-v1` adds **HeyBuddy for Android** (`android/`) and a
+self-hosted **FastAPI backend** (`backend/`) that keeps all AI keys off the
+phone (Vercel AI Gateway for the model, Gradium for voice, Composio for
+connected apps). Summon it with the assistant gesture (when set as the default
+digital assistant), a Quick Settings tile, a widget or a shortcut; it looks at
+your screen, answers out loud, draws marks over the app you're in and walks you
+through taps.
+
+* Install and setup: [android/README.md](android/README.md)
+* Backend deployment: [backend/DEPLOY.md](backend/DEPLOY.md)
+* Architecture: [docs/ANDROID_ARCHITECTURE.md](docs/ANDROID_ARCHITECTURE.md)
+* What can and can't match the desktop: [docs/ANDROID_FEATURE_COMPARISON.md](docs/ANDROID_FEATURE_COMPARISON.md),
+  [docs/ANDROID_ACTIVATION.md](docs/ANDROID_ACTIVATION.md)
+* Providers: [docs/API_INTEGRATION_GUIDE.md](docs/API_INTEGRATION_GUIDE.md)
+* Security: [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md)
+* Test results: [docs/ANDROID_TESTING.md](docs/ANDROID_TESTING.md)
+
+The Android preview is verified in CI (unit tests, lint, emulator tests) but
+**not yet on a real phone or with live providers**.
+
 ## What it does
 
 1. Hold **Ctrl+Alt** anywhere and ask a question ("how do I turn on dark mode here?").

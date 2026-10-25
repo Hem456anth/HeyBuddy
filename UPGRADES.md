@@ -1,5 +1,32 @@
 # HeyBuddy changelog
 
+## Android 0.1.0 preview (branch `android-v1`)
+
+- **HeyBuddy for Android** (`android/`): Kotlin + Jetpack Compose app with a
+  pure-JVM `:core` (buddy-program parser, screen mapping, backend protocol,
+  tool policy, memory, jobs, beat speaker).
+- **Summon**: default digital assistant (VoiceInteractionService; the OEM's
+  assistant gesture such as long-press power where offered), Quick Settings
+  tile, Glance widget, launcher shortcuts, accessibility button, optional
+  "Tap to talk" notification. No power-key interception; power menu and
+  Emergency SOS untouched.
+- **Screen context** from the assist screenshot, accessibility screenshots
+  (API 30+) or opt-in one-frame MediaProjection; **ink overlay** via
+  accessibility or "Display over other apps", else marks on a screenshot copy.
+- **Guided taps** via accessibility tap events; **tools** with approvals;
+  **connected apps** through Composio with server-validated, single-use,
+  argument-bound proposals and mandatory confirmation for writes.
+- **Backend** (`backend/`, FastAPI): device pairing with hashed tokens,
+  rate limits, model allowlist, SSE chat via Vercel AI Gateway, Gradium
+  TTS/STT, Composio v3.1, redacted logs, Dockerfile, deploy guide.
+- **CI** (`.github/workflows/android-build.yml`): backend ruff + pytest,
+  `:core` tests, lint, debug + release APK (CI-generated preview key, not a
+  Play key), emulator tests on API 26/30/34/35, pre-release
+  `android-v0.1.0-preview` with APKs, SHA256SUMS and test reports.
+- Not yet verified on real devices, with live providers, or for battery and
+  latency (see docs/ANDROID_TESTING.md).
+
+
 ## 0.3.0 — HeyClicky-class companion (clean-room)
 
 From a reverse-engineering study of HeyClicky for Windows 1.1.3
