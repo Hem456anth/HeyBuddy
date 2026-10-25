@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+. Secrets are excluded from cloud backup and device transfer
+     (they are bound to this device's Keystore key anyway). -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="heybuddy_secrets.xml" />
+        <exclude domain="file" path="jobs" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="heybuddy_secrets.xml" />
+    </device-transfer>
+</data-extraction-rules>

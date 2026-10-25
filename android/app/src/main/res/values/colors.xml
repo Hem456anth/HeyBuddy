@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="hb_background">#FF101114</color>
+    <color name="hb_accent">#FF3D7BFF</color>
+    <color name="hb_icon_bg">#FF15161A</color>
+</resources>

@@ -45,3 +45,9 @@ node_modules/
 worker/node_modules/
 worker/.dev.vars
 worker/.wrangler/
+
+# Android
+android/local.properties
+android/.gradle/
+*.jks
+*.keystore

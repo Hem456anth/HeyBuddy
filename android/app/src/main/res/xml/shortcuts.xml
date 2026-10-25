@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="talk"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_talk"
+        android:shortcutShortLabel="@string/shortcut_talk_short"
+        android:shortcutLongLabel="@string/shortcut_talk_long">
+        <intent
+            android:action="com.heybuddy.android.action.TALK"
+            android:targetPackage="com.heybuddy.android"
+            android:targetClass="com.heybuddy.android.ui.CompanionActivity" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="type"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_talk"
+        android:shortcutShortLabel="@string/shortcut_type_short"
+        android:shortcutLongLabel="@string/shortcut_type_long">
+        <intent
+            android:action="com.heybuddy.android.action.TALK"
+            android:targetPackage="com.heybuddy.android"
+            android:targetClass="com.heybuddy.android.ui.CompanionActivity">
+            <extra android:name="mode" android:value="type" />
+        </intent>
+    </shortcut>
+</shortcuts>

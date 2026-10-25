@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HeyBuddy</string>
+    <string name="a11y_label">HeyBuddy helper</string>
+    <string name="a11y_description">Lets HeyBuddy draw its pointer and notes on top of other apps, notice when you tap the spot it highlighted during a guided walkthrough, type text into the field you are using (always after you approve), take a screenshot when you call HeyBuddy, and start HeyBuddy from the accessibility button. HeyBuddy never reads your screen unless you call it, never acts without showing you, and keeps nothing it sees.</string>
+    <string name="tile_label">Talk to HeyBuddy</string>
+    <string name="widget_label">HeyBuddy</string>
+    <string name="widget_description">One tap to talk to HeyBuddy</string>
+    <string name="shortcut_talk_short">Talk</string>
+    <string name="shortcut_talk_long">Talk to HeyBuddy</string>
+    <string name="shortcut_type_short">Type</string>
+    <string name="shortcut_type_long">Type a question</string>
+    <string name="notification_channel_companion">Companion</string>
+    <string name="notification_channel_jobs">Background jobs</string>
+    <string name="notification_channel_approvals">Approvals</string>
+</resources>

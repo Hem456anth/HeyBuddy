@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and lower. Secrets (Keystore-wrapped Worker secret) never leave the device. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="heybuddy_secrets.xml" />
+    <exclude domain="file" path="jobs" />
+    <exclude domain="cache" path="." />
+</full-backup-content>
