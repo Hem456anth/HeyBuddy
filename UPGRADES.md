@@ -1,5 +1,31 @@
 # HeyBuddy changelog
 
+## 0.3.0 — HeyClicky-class companion (clean-room)
+
+From a reverse-engineering study of HeyClicky for Windows 1.1.3
+(docs/HEYCLICKY_TEARDOWN.md):
+- **Draws on screen while it talks.** Replies are buddy programs: each
+  `say()` line owns rings, frames, highlights, underlines, arrows, numbered
+  badges, handwritten notes and free traces, drawn in sync with speech and
+  hidden from screenshots.
+- **Guided walkthroughs.** `target()` outlines the control to click, waits
+  for your click, then continues with a fresh screenshot.
+- **Acts on your PC** with Anthropic tool use: open links/files, copy, type
+  at the caret, list/read/write files, PowerShell, web fetch, active window.
+  Commands and outside writes ask first; secrets locations are off limits.
+- **Background jobs** with their own folders (`output/`, `tmp/`,
+  `AGENTS.md`), progress, artifacts, a Jobs tab and a spoken result.
+- **Notch** at the top of the screen; **double-tap Ctrl** quick-ask box;
+  **hold Ctrl+Win** dictation typed at the caret; **Esc** cancels.
+- **Memory** in a local `memory.md` (`remember` tool, `noted()`).
+- Per-line speech with prefetch; 0.5 s minimum hold and 150 ms release tail.
+- **Installer**: per-user Inno Setup package with Start menu shortcut,
+  optional launch at login and a clean uninstaller; CI installs it, runs the
+  self-check on the installed copy and uninstalls it.
+- Self-check now also proves the tool round trip, the program pipeline, ink
+  drawn on screen but hidden from capture, target hit-testing, memory and a
+  background job producing a file.
+
 ## 0.2.0 — Clicky-faithful Windows port
 
 Correctness

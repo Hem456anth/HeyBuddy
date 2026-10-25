@@ -30,16 +30,30 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
 from ..api.assemblyai_streaming import AssemblyAIStreamingSession
-from ..api.claude_client import ClaudeClient
+from typing import TYPE_CHECKING, Callable
+
+from ..api.claude_client import ClaudeClient, ToolCall, run_tool_loop, stream_round
 from ..api.cloudflare_proxy import CloudflareProxy
 from ..api.elevenlabs_client import ElevenLabsClient
 from ..models.config import AppConfig
 from ..models.message import CapturedScreen, Message, PointMarker, Role
-from ..utils.constants import RECORDINGS_DIR
+from ..utils import win32
+from ..utils.constants import CONVERSATION_HISTORY_MAX_EXCHANGES, RECORDINGS_DIR
 from ..utils.logger import get_logger
 from .audio_player import AudioPlayer
 from .audio_recorder import AudioRecorder
+from .beat_speaker import BeatSpeaker
+from .memory_store import MemoryStore
+from .scene_program import Beat, display_text_for_partial, parse_reply_program, resolve_marks
 from .screen_capture import ScreenCapture
+from .tools import VOICE_TOOLS, ToolContext, ToolError, default_working_dir, execute_tool, tool_definitions
+
+if TYPE_CHECKING:
+    from .jobs import JobManager
+
+MAX_TOOL_ROUNDS = 6
+MINIMUM_HOLD_SECONDS = 0.5
+RELEASE_TAIL_SECONDS = 0.15
 
 log = get_logger(__name__)
 
@@ -95,6 +109,11 @@ class CompanionManager(QObject):
     turn_interrupted = pyqtSignal()               # overlay should abandon pointing
     error_occurred = pyqtSignal(str)
     audio_level_changed = pyqtSignal(float)       # mic RMS 0..1 while LISTENING
+    beat_started = pyqtSignal(object)             # Beat (resolved marks) as its line starts
+    speech_finished = pyqtSignal()                # every beat of the turn has been spoken
+    task_changed = pyqtSignal(str)                # task("...") from a guided walkthrough
+    tool_activity = pyqtSignal(str)               # tool name being executed
+    dictation_delivered = pyqtSignal(str)         # text typed at the caret
 
     def __init__(
         self,
@@ -105,8 +124,17 @@ class CompanionManager(QObject):
         claude: ClaudeClient,
         tts: ElevenLabsClient,
         player: AudioPlayer,
+        memory: MemoryStore | None = None,
+        jobs: "JobManager | None" = None,
+        approve: Callable[[str, str], bool] | None = None,
     ) -> None:
         super().__init__()
+        self.memory = memory
+        self.jobs = jobs
+        self.approve = approve or (lambda _title, _detail: False)
+        self._active_speaker: BeatSpeaker | None = None
+        self._dictating = False
+        self._press_started_at = 0.0
         self.config = config
         self.recorder = recorder
         self.screen = screen
@@ -162,6 +190,7 @@ class CompanionManager(QObject):
                 self._interrupt_current_turn_locked()
             self._turn_generation += 1
             generation = self._turn_generation
+            self._press_started_at = time.monotonic()
             self._set_state_locked(CompanionState.LISTENING)
         threading.Thread(
             target=self._open_stt_and_start_recording,
@@ -174,6 +203,13 @@ class CompanionManager(QObject):
         """Hotkey release."""
         with self._state_lock:
             if self._state != CompanionState.LISTENING:
+                return
+            if time.monotonic() - self._press_started_at < MINIMUM_HOLD_SECONDS:
+                # A brush of the keys, not a question (HeyClicky: 0.5 s).
+                self._turn_generation += 1
+                log.info("Push-to-talk released after < %.1f s; ignored", MINIMUM_HOLD_SECONDS)
+                self._teardown_capture()
+                self._set_state_locked(CompanionState.IDLE)
                 return
             generation = self._turn_generation
             self._set_state_locked(CompanionState.PROCESSING)
@@ -280,6 +316,9 @@ class CompanionManager(QObject):
             socket_ready.set()
 
     def _finish_capture_and_respond(self, generation: int) -> None:
+        # Keep the mic open a moment after release so the last syllable
+        # isn't clipped (HeyClicky waits a 150 ms tail).
+        time.sleep(RELEASE_TAIL_SECONDS)
         pcm_bytes = self.recorder.stop()
         self.recorder.set_chunk_listener(None)
         self.recorder.set_level_listener(None)
@@ -312,6 +351,9 @@ class CompanionManager(QObject):
 
         if generation != self._turn_generation:
             return
+        if self._dictating:
+            self._deliver_dictation(generation, final_transcript)
+            return
         if not final_transcript:
             log.info("No speech detected; back to IDLE")
             self._set_state_if_current(generation, CompanionState.IDLE)
@@ -320,9 +362,37 @@ class CompanionManager(QObject):
         self._respond_to_user_text(generation, final_transcript, self.config.screen_capture_enabled)
 
     # ---- response path ----
+    def _system_prompt(self) -> str:
+        prompt = self.claude.system_prompt
+        extras: list[str] = []
+        if self.memory is not None and self.config.memory_enabled:
+            block = self.memory.prompt_block()
+            if block:
+                extras.append(block)
+        try:
+            window = win32.get_foreground_window_info()
+            if window.get("title") or window.get("process"):
+                extras.append(f"the user's focused window: {window.get('title', '')} ({window.get('process', '')})")
+        except Exception:
+            pass
+        extras.append(f"local time: {time.strftime('%A %Y-%m-%d %H:%M')}")
+        return prompt + "\n\n" + "\n\n".join(extras)
+
+    def _tool_context(self) -> ToolContext:
+        return ToolContext(
+            working_dir=default_working_dir(),
+            approve=self.approve,
+            command_policy=self.config.command_policy,
+            write_policy=self.config.write_policy,
+            allow_background_jobs=self.config.background_jobs_enabled and self.jobs is not None,
+            start_job=(self.jobs.start if self.jobs is not None else None),
+            memory=self.memory if self.config.memory_enabled else None,
+        )
+
     def _respond_to_user_text(self, generation: int, text: str, include_screenshot: bool) -> None:
         user_message = Message(role=Role.USER, content=text)
-        self.message_appended.emit(user_message)
+        if not text.startswith("[app]"):
+            self.message_appended.emit(user_message)
         self._set_state_if_current(generation, CompanionState.PROCESSING)
 
         captured_screens: list[CapturedScreen] = []
@@ -335,64 +405,181 @@ class CompanionManager(QObject):
         def is_current_turn() -> bool:
             return generation == self._turn_generation
 
-        try:
-            reply = self.claude.stream_full_reply(
-                self._history + [user_message],
-                screens=captured_screens,
-                on_partial=lambda spoken_so_far: (
-                    self.assistant_partial.emit(spoken_so_far) if is_current_turn() else None
-                ),
-                should_continue=is_current_turn,
+        payload = self.claude.build_payload(self._history + [user_message], screens=captured_screens)
+        payload["system"] = self._system_prompt()
+        if self.config.tools_enabled:
+            names = tuple(
+                name for name in VOICE_TOOLS
+                if name != "start_background_job" or (self.config.background_jobs_enabled and self.jobs is not None)
             )
+            if not self.config.memory_enabled:
+                names = tuple(name for name in names if name != "remember")
+            payload["tools"] = tool_definitions(names)
+
+        spoken_parts: list[str] = []
+        streamed_text: list[str] = []
+        all_noted: list[str] = []
+        speaker_holder: list[BeatSpeaker] = []
+        turn_finished = threading.Event()
+
+        def on_all_done() -> None:
+            turn_finished.set()
+            if is_current_turn():
+                self.speech_finished.emit()
+                self._set_state_if_current(generation, CompanionState.IDLE)
+
+        def on_audio_started() -> None:
+            self._set_state_if_current(generation, CompanionState.RESPONDING)
+
+        def on_beat_started(beat: Beat) -> None:
+            if not is_current_turn():
+                return
+            self.beat_started.emit(beat)
+            markers = [
+                PointMarker(
+                    x=int(mark.params["x"]), y=int(mark.params["y"]), label=mark.label,
+                    screen_index=mark.screen_index,
+                    physical_x=int(mark.physical["x"]), physical_y=int(mark.physical["y"]),
+                )
+                for mark in beat.marks if mark.kind == "point" and mark.is_resolved
+            ]
+            if markers:
+                self.pointing_requested.emit(markers)
+                for marker in markers:
+                    self.point_received.emit(marker)
+
+        speaker = BeatSpeaker(
+            synthesize=self.tts.synthesize if self.config.tts_enabled else None,
+            play_mp3=self.player.play_mp3 if self.config.tts_enabled else None,
+            on_beat_started=on_beat_started,
+            on_audio_started=on_audio_started,
+            on_all_done=on_all_done,
+            on_error=lambda message: self.error_occurred.emit(message) if is_current_turn() else None,
+        )
+        speaker_holder.append(speaker)
+        with self._state_lock:
+            if not is_current_turn():
+                speaker.cancel()
+                return
+            self._active_speaker = speaker
+
+        def speak_round(round_text: str, more_coming: bool) -> None:
+            if not is_current_turn():
+                return
+            program = resolve_marks(parse_reply_program(round_text), captured_screens)
+            if program.parse_errors:
+                log.info("Program parse issues: %s", "; ".join(program.parse_errors[:5]))
+            if program.task_title:
+                self.task_changed.emit(program.task_title)
+            all_noted.extend(program.noted_facts)
+            for beat in program.beats:
+                if not self.config.annotations_enabled:
+                    beat.marks = [mark for mark in beat.marks if mark.kind == "point"]
+                if beat.text:
+                    spoken_parts.append(beat.text)
+                if beat.text or beat.marks:
+                    speaker.add(beat)
+
+        def on_text(piece: str) -> None:
+            streamed_text.append(piece)
+            if is_current_turn():
+                self.assistant_partial.emit(display_text_for_partial("".join(streamed_text)))
+
+        context = self._tool_context()
+
+        def execute(call: ToolCall) -> tuple[str, bool]:
+            streamed_text.append("\n")
+            self.tool_activity.emit(call.name)
+            try:
+                return execute_tool(call.name, call.input, context), False
+            except ToolError as refusal:
+                return str(refusal), True
+
+        try:
+            if self.config.tools_enabled:
+                run_tool_loop(
+                    self.claude, payload, execute,
+                    on_round_text=speak_round, on_text=on_text,
+                    should_continue=is_current_turn, max_rounds=MAX_TOOL_ROUNDS,
+                )
+            else:
+                result = stream_round(self.claude, payload, on_text=on_text, should_continue=is_current_turn)
+                if result.text.strip():
+                    speak_round(result.text, False)
         except Exception as claude_error:
+            speaker.cancel()
             self._fail(generation, f"Claude request failed: {claude_error}")
             return
         if not is_current_turn():
+            speaker.cancel()
             return
 
-        reply.points = resolve_point_markers(reply.points, captured_screens)
+        if self.memory is not None and self.config.memory_enabled:
+            for fact in all_noted:
+                self.memory.add(fact)
+        reply = Message(role=Role.ASSISTANT, content=" ".join(spoken_parts).strip() or "(no reply)")
         self._history.extend([user_message, reply])
+        self._history = self._history[-(CONVERSATION_HISTORY_MAX_EXCHANGES * 2 + 4):]
         self.message_appended.emit(reply)
-        log.info(
-            "Reply: %d chars, %d point(s)%s", len(reply.content), len(reply.points),
-            " (explicit none)" if reply.explicitly_no_point else "",
-        )
+        log.info("Reply: %d chars spoken", len(reply.content))
+        speaker.close()
 
-        if self.config.tts_enabled and reply.content.strip():
-            try:
-                mp3_bytes = self.tts.synthesize(reply.content)
-            except Exception as tts_error:
-                log.exception("TTS synthesis failed")
-                # The answer is still on screen and the cursor can still point;
-                # a voice failure shouldn't throw the whole turn away.
-                self.error_occurred.emit(f"Voice unavailable: {tts_error}")
-                self._emit_pointing(reply.points)
-                self._set_state_if_current(generation, CompanionState.IDLE)
-                return
-            if not is_current_turn():
-                return
-
-            def on_audio_started() -> None:
-                if is_current_turn():
-                    self._set_state_if_current(generation, CompanionState.RESPONDING)
-                    # Fly while the buddy talks, like Clicky.
-                    self._emit_pointing(reply.points)
-
-            self.player.play_mp3(
-                mp3_bytes,
-                on_started=on_audio_started,
-                on_finished=lambda: self._set_state_if_current(generation, CompanionState.IDLE),
-            )
-        else:
-            self._emit_pointing(reply.points)
-            self._set_state_if_current(generation, CompanionState.IDLE)
-
-    def _emit_pointing(self, markers: list[PointMarker]) -> None:
-        if not markers:
+    def continue_after_target_click(self, label: str) -> None:
+        """The user clicked the control a target() asked for: next step."""
+        if not self.config.guided_steps_enabled:
             return
-        self.pointing_requested.emit(list(markers))
-        for marker in markers:
-            self.point_received.emit(marker)
+        description = f'[app] the user clicked "{label}", the step your drawing asked for. here is their screen now; continue with the next step, or say it\'s done.'
+        self.send_text(description, include_screenshot=True)
+
+    def announce(self, text: str) -> None:
+        """Speak a short notice (a finished job) if the buddy is idle."""
+        text = (text or "").strip()
+        if not text or not self.config.tts_enabled or self._state != CompanionState.IDLE:
+            return
+
+        def run() -> None:
+            try:
+                mp3_bytes = self.tts.synthesize(text)
+            except Exception:
+                log.exception("Announcement TTS failed")
+                return
+            if self._state == CompanionState.IDLE and not self.player.is_playing:
+                self.player.play_mp3(mp3_bytes)
+
+        threading.Thread(target=run, name="Announce", daemon=True).start()
+
+    # ---- dictation (hold Ctrl+Win: speech is typed at the caret) ----
+    def begin_dictation(self) -> None:
+        if not self._enabled or not self.config.dictation_enabled:
+            return
+        with self._state_lock:
+            if self._state != CompanionState.IDLE:
+                return
+            self._turn_generation += 1
+            generation = self._turn_generation
+            self._dictating = True
+            self._press_started_at = time.monotonic()
+            self._set_state_locked(CompanionState.LISTENING)
+        threading.Thread(target=self._open_stt_and_start_recording, args=(generation,),
+                         name="DictationCapture", daemon=True).start()
+
+    def end_dictation(self) -> None:
+        with self._state_lock:
+            if self._state != CompanionState.LISTENING or not self._dictating:
+                return
+            generation = self._turn_generation
+            self._set_state_locked(CompanionState.PROCESSING)
+        threading.Thread(target=self._finish_capture_and_respond, args=(generation,),
+                         name="DictationFinish", daemon=True).start()
+
+    def _deliver_dictation(self, generation: int, transcript: str) -> None:
+        self._dictating = False
+        if transcript and generation == self._turn_generation:
+            ok = win32.paste_text_into_focused_window(transcript + " ")
+            self.dictation_delivered.emit(transcript if ok else "")
+            if not ok:
+                self.error_occurred.emit("Couldn't type into the focused window; the text is on your clipboard.")
+        self._set_state_if_current(generation, CompanionState.IDLE)
 
     # ---- STT callbacks (reader thread) -----
     def _on_stt_partial(self, generation: int, partial: str) -> None:
@@ -403,10 +590,15 @@ class CompanionManager(QObject):
 
     # ---- helpers -----
     def _interrupt_current_turn_locked(self) -> None:
+        speaker = self._active_speaker
+        self._active_speaker = None
+        if speaker is not None:
+            speaker.cancel()
         self.player.stop()
         self.turn_interrupted.emit()
 
     def _teardown_capture(self) -> None:
+        self._dictating = False
         self.recorder.cancel()
         self.recorder.set_chunk_listener(None)
         self.recorder.set_level_listener(None)

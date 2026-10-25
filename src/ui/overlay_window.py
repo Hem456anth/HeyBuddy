@@ -32,7 +32,7 @@ import math
 import time
 from typing import Iterable
 
-from PyQt6.QtCore import QObject, QPointF, QRect, QRectF, Qt, QTimer, pyqtSlot
+from PyQt6.QtCore import QObject, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import (
     QBrush,
     QColor,
@@ -52,10 +52,13 @@ from PyQt6.QtWidgets import QWidget
 from ..core.buddy_motion import BuddyNavigator, BuddyPose, NavigationMode, PointingTarget
 from ..core.companion_manager import CompanionState
 from ..models.config import AppConfig
+from ..core.scene_program import Beat
 from ..models.message import PointMarker
+from .ink_layer import InkLayer, LiveMark, mark_monitor_key, paint_mark
 from ..utils.logger import get_logger
 from ..utils.win32 import (
     MonitorInfo,
+    is_left_mouse_button_down,
     apply_overlay_window_styles,
     enumerate_monitors,
     exclude_window_from_capture,
@@ -180,25 +183,34 @@ class _ScreenOverlayWindow(QWidget):
 
     # ----- painting -----
     def paintEvent(self, _event) -> None:  # type: ignore[override]
+        ink_marks = self._controller.ink_marks_for(self.monitor)
         frame = self._controller.current_frame
-        if frame is None or frame.opacity <= 0.001:
-            return
-        pose = frame.pose
-        if not self.contains_physical(pose.x, pose.y):
+        draw_buddy = (
+            frame is not None and frame.opacity > 0.001
+            and self.contains_physical(frame.pose.x, frame.pose.y)
+        )
+        if not ink_marks and not draw_buddy:
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setOpacity(frame.opacity)
-        center = self.physical_to_local(pose.x, pose.y)
-        state = frame.companion_state
-        if state == CompanionState.LISTENING and pose.mode == NavigationMode.FOLLOWING:
-            _paint_waveform(painter, center, frame.audio_level, frame.clock)
-        elif state == CompanionState.PROCESSING and pose.mode == NavigationMode.FOLLOWING:
-            _paint_spinner(painter, center, frame.clock)
-        else:
-            _paint_triangle(painter, center, pose.rotation_degrees, pose.scale)
-        if pose.bubble_text and pose.bubble_opacity > 0.0:
-            _paint_bubble(painter, center, pose.bubble_text, pose.bubble_opacity * frame.opacity, pose.bubble_scale)
+        if ink_marks:
+            now = time.monotonic()
+            for live in ink_marks:
+                paint_mark(painter, live, self.physical_to_local, now, self.device_pixel_ratio)
+        if draw_buddy:
+            assert frame is not None
+            pose = frame.pose
+            painter.setOpacity(frame.opacity)
+            center = self.physical_to_local(pose.x, pose.y)
+            state = frame.companion_state
+            if state == CompanionState.LISTENING and pose.mode == NavigationMode.FOLLOWING:
+                _paint_waveform(painter, center, frame.audio_level, frame.clock)
+            elif state == CompanionState.PROCESSING and pose.mode == NavigationMode.FOLLOWING:
+                _paint_spinner(painter, center, frame.clock)
+            else:
+                _paint_triangle(painter, center, pose.rotation_degrees, pose.scale)
+            if pose.bubble_text and pose.bubble_opacity > 0.0:
+                _paint_bubble(painter, center, pose.bubble_text, pose.bubble_opacity * frame.opacity, pose.bubble_scale)
         painter.end()
 
 
@@ -215,10 +227,17 @@ class _Frame:
 
 
 class BuddyOverlayController(QObject):
-    """Owns the per-screen windows, the frame clock and the navigator."""
+    """Owns the per-screen windows, the frame clock, the navigator and ink."""
+
+    # The user clicked inside a target(...) box: label of that box.
+    target_clicked = pyqtSignal(str)
 
     def __init__(self, config: AppConfig) -> None:
         super().__init__()
+        self.ink = InkLayer()
+        self._ink_clear_deadline: float | None = None
+        self._mouse_was_down = False
+        self._ink_windows_dirty = False
         self.config = config
         self._monitors: list[MonitorInfo] = []
         self._windows: list[_ScreenOverlayWindow] = []
@@ -278,8 +297,12 @@ class BuddyOverlayController(QObject):
         self._companion_state = state
         self._last_activity_time = time.monotonic()
         if state == CompanionState.LISTENING:
-            # A new question always wins over an old pointing animation.
+            # A new question always wins over an old pointing animation
+            # and wipes the previous answer's marks (HeyClicky does both).
             self._navigator.cancel()
+            if self.ink.has_marks:
+                self.ink.clear()
+                self._ink_windows_dirty = True
 
     @pyqtSlot(float)
     def set_audio_level(self, level: float) -> None:
@@ -313,6 +336,62 @@ class BuddyOverlayController(QObject):
     @pyqtSlot()
     def cancel_pointing(self) -> None:
         self._navigator.cancel()
+        self.ink.clear(keep_targets=False)
+
+    # ----- ink -----
+    @pyqtSlot(object)
+    def show_beat(self, beat: Beat) -> None:
+        now = time.monotonic()
+        if beat.clear_before:
+            self.ink.clear(now)
+        self.ink.add(beat.marks, now)
+        self._ink_clear_deadline = None
+        if self.ink.has_marks:
+            self._ink_windows_dirty = True
+            self._sync_window_visibility()
+
+    @pyqtSlot()
+    def on_speech_finished(self) -> None:
+        """Answer over: let the marks linger, then fade (targets stay)."""
+        if self.ink.has_marks:
+            self._ink_clear_deadline = time.monotonic() + max(0.5, float(self.config.annotation_linger_seconds))
+
+    @pyqtSlot()
+    def clear_ink(self) -> None:
+        self.ink.clear()
+        self._ink_windows_dirty = True
+
+    def ink_marks_for(self, monitor: MonitorInfo) -> list[LiveMark]:
+        key = (float(monitor.left), float(monitor.top))
+        return [live for live in self.ink.marks if mark_monitor_key(live) == key]
+
+    def _tick_ink(self, now: float) -> None:
+        if not self.ink.has_marks and not self._ink_windows_dirty:
+            return
+        if self._ink_clear_deadline is not None and now >= self._ink_clear_deadline:
+            self._ink_clear_deadline = None
+            self.ink.clear(now, keep_targets=True)
+        # Guided steps: a click (press then release) inside an armed target.
+        targets = self.ink.armed_targets()
+        mouse_down = is_left_mouse_button_down() if targets else False
+        if targets and self._mouse_was_down and not mouse_down:
+            cursor_x, cursor_y = get_cursor_position()
+            hit = self.ink.hit_target(float(cursor_x), float(cursor_y))
+            if hit is not None:
+                hit.clicked = True
+                self.ink.clear(now)
+                log.info("Target clicked: %r", hit.mark.label)
+                self.target_clicked.emit(hit.mark.label or "the highlighted control")
+        self._mouse_was_down = mouse_down
+        animating = self.ink.is_animating(now)
+        had_marks = self.ink.has_marks
+        self.ink.prune(now)
+        just_emptied = had_marks and not self.ink.has_marks
+        if animating or self._ink_windows_dirty or just_emptied:
+            for window in self._windows:
+                if window.isVisible():
+                    window.update()
+        self._ink_windows_dirty = False
 
     @pyqtSlot()
     def apply_config(self) -> None:
@@ -341,8 +420,12 @@ class BuddyOverlayController(QObject):
             else:
                 self._opacity = max(target_opacity, self._opacity - step)
         self._sync_window_visibility()
+        self._tick_ink(now)
         if self._opacity <= 0.0 and not self._navigator.is_navigating:
-            self.current_frame = None
+            if self.current_frame is not None:
+                self.current_frame = None
+                for window in self._windows:
+                    window.schedule_repaint_around(None)
             return
 
         cursor_x, cursor_y = get_cursor_position()
@@ -367,7 +450,7 @@ class BuddyOverlayController(QObject):
                 window.schedule_repaint_around(None)
 
     def _sync_window_visibility(self) -> None:
-        should_show = self._opacity > 0.0 or self._navigator.is_navigating
+        should_show = self._opacity > 0.0 or self._navigator.is_navigating or self.ink.has_marks
         for window in self._windows:
             if should_show and not window.isVisible():
                 window.show()

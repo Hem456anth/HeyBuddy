@@ -497,7 +497,11 @@ class LowLevelKeyboardHook:
         on_press: Callable[[], None],
         on_release: Callable[[], None],
         on_cancel: Callable[[], None] | None = None,
+        on_raw_key: Callable[[int, bool], None] | None = None,
     ) -> None:
+        # Every key event (vk, is_down), for gesture detectors such as
+        # double-tap Ctrl and Esc. Must be cheap; runs on the hook thread.
+        self._on_raw_key = on_raw_key
         # `chord_vk_codes` is an iterable of groups; each group is satisfied by
         # any one VK in it. For Ctrl+Alt we pass [{VK_LCONTROL, VK_RCONTROL},
         # {VK_LMENU, VK_RMENU}] so either physical Ctrl + either physical Alt
@@ -582,10 +586,15 @@ class LowLevelKeyboardHook:
         try:
             kb = ctypes.cast(lparam, ctypes.POINTER(_KBDLLHOOKSTRUCT))[0]
             vk = kb.vkCode
+            injected = bool(kb.flags & 0x10)  # LLKHF_INJECTED: our own SendInput
             if wparam in (WM_KEYDOWN, WM_SYSKEYDOWN):
                 self._on_vk_down(vk)
+                if self._on_raw_key is not None and not injected:
+                    self._on_raw_key(vk, True)
             elif wparam in (WM_KEYUP, WM_SYSKEYUP):
                 self._on_vk_up(vk)
+                if self._on_raw_key is not None and not injected:
+                    self._on_raw_key(vk, False)
         except Exception:
             # Never let an exception cross the OS boundary; that crashes the
             # process. Log and pass the event on.
@@ -647,6 +656,9 @@ HOTKEY_PRESETS: dict[str, tuple[tuple[int, ...], ...]] = {
     "alt+shift": ((VK_LMENU, VK_RMENU), (VK_LSHIFT, VK_RSHIFT)),
     "right_alt": ((VK_RMENU,),),
     "alt+space": ((VK_LMENU, VK_RMENU), (VK_SPACE,)),
+    # Dictation default (HeyClicky uses hold Ctrl+Win for dictation).
+    "ctrl+win": ((VK_LCONTROL, VK_RCONTROL), (VK_LWIN, VK_RWIN)),
+    "ctrl+shift+space": ((VK_LCONTROL, VK_RCONTROL), (VK_LSHIFT, VK_RSHIFT), (VK_SPACE,)),
 }
 
 # Back-compat alias used by `core.hotkey_monitor` before Phase 3.
@@ -1046,3 +1058,213 @@ def get_window_display_affinity(hwnd: int) -> int:
 
 def set_window_display_affinity(hwnd: int, affinity: int) -> bool:
     return bool(_user32.SetWindowDisplayAffinity(hwnd, affinity))
+
+
+# ---------------------------------------------------------------------------
+# Clipboard, synthetic input, foreground window, mouse buttons
+# (used by the tools layer, dictation and guided `target()` steps)
+# ---------------------------------------------------------------------------
+
+CF_UNICODETEXT = 13
+GMEM_MOVEABLE = 0x0002
+INPUT_KEYBOARD = 1
+KEYEVENTF_KEYUP = 0x0002
+VK_CONTROL = 0x11
+VK_V = 0x56
+VK_LBUTTON = 0x01
+VK_ESCAPE = 0x1B
+# An unassigned VK. Tapping it while Win is held makes Windows treat the
+# Win press as a chord, so releasing Win does not pop the Start menu.
+VK_NONE_ASSIGNED = 0xFF
+
+_kernel32.GlobalAlloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
+_kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+_kernel32.GlobalLock.argtypes = (wintypes.HGLOBAL,)
+_kernel32.GlobalLock.restype = ctypes.c_void_p
+_kernel32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
+_kernel32.GlobalFree.argtypes = (wintypes.HGLOBAL,)
+_user32.OpenClipboard.argtypes = (wintypes.HWND,)
+_user32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
+_user32.SetClipboardData.restype = wintypes.HANDLE
+_user32.GetClipboardData.argtypes = (wintypes.UINT,)
+_user32.GetClipboardData.restype = wintypes.HANDLE
+_user32.GetForegroundWindow.restype = wintypes.HWND
+_user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+_user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
+_user32.GetAsyncKeyState.restype = ctypes.c_short
+_user32.GetWindowTextLengthW.argtypes = (wintypes.HWND,)
+_user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+_kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+_kernel32.OpenProcess.restype = wintypes.HANDLE
+_kernel32.QueryFullProcessImageNameW.argtypes = (
+    wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+)
+_kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", wintypes.LONG), ("dy", wintypes.LONG), ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class _INPUTUNION(ctypes.Union):
+    _fields_ = [("ki", _KEYBDINPUT), ("mi", _MOUSEINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", wintypes.DWORD), ("union", _INPUTUNION)]
+
+
+_user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(_INPUT), ctypes.c_int)
+_user32.SendInput.restype = wintypes.UINT
+
+
+def _key_input(vk: int, key_up: bool) -> _INPUT:
+    event = _INPUT()
+    event.type = INPUT_KEYBOARD
+    event.union.ki = _KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP if key_up else 0, 0, 0)
+    return event
+
+
+def _send_keys(sequence: list[tuple[int, bool]]) -> bool:
+    events = (_INPUT * len(sequence))(*[_key_input(vk, up) for vk, up in sequence])
+    sent = _user32.SendInput(len(sequence), events, ctypes.sizeof(_INPUT))
+    return sent == len(sequence)
+
+
+def set_clipboard_text(text: str) -> bool:
+    """Put Unicode text on the clipboard (works from any thread)."""
+    data = (text or "").encode("utf-16-le") + b"\x00\x00"
+    for _attempt in range(10):
+        if _user32.OpenClipboard(None):
+            break
+        import time as _time
+        _time.sleep(0.02)
+    else:
+        return False
+    try:
+        _user32.EmptyClipboard()
+        handle = _kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+        if not handle:
+            return False
+        pointer = _kernel32.GlobalLock(handle)
+        ctypes.memmove(pointer, data, len(data))
+        _kernel32.GlobalUnlock(handle)
+        if not _user32.SetClipboardData(CF_UNICODETEXT, handle):
+            _kernel32.GlobalFree(handle)
+            return False
+        return True
+    finally:
+        _user32.CloseClipboard()
+
+
+def get_clipboard_text() -> str:
+    if not _user32.OpenClipboard(None):
+        return ""
+    try:
+        handle = _user32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
+            return ""
+        pointer = _kernel32.GlobalLock(handle)
+        try:
+            return ctypes.wstring_at(pointer) if pointer else ""
+        finally:
+            _kernel32.GlobalUnlock(handle)
+    finally:
+        _user32.CloseClipboard()
+
+
+def paste_text_into_focused_window(text: str) -> bool:
+    """Insert text where the user's caret is: clipboard + Ctrl+V.
+
+    The previous clipboard text is restored afterwards so dictation does
+    not clobber what the user had copied.
+    """
+    previous = ""
+    try:
+        previous = get_clipboard_text()
+    except Exception:
+        previous = ""
+    if not set_clipboard_text(text):
+        return False
+    import time as _time
+    _time.sleep(0.03)
+    ok = _send_keys([(VK_CONTROL, False), (VK_V, False), (VK_V, True), (VK_CONTROL, True)])
+    if previous:
+        def _restore() -> None:
+            _time.sleep(0.6)
+            set_clipboard_text(previous)
+        threading.Thread(target=_restore, name="ClipboardRestore", daemon=True).start()
+    return ok
+
+
+def suppress_start_menu_on_win_release() -> None:
+    """Tap an unassigned key so the coming Win key-up isn't a lone Win tap."""
+    _send_keys([(VK_NONE_ASSIGNED, False), (VK_NONE_ASSIGNED, True)])
+
+
+def is_left_mouse_button_down() -> bool:
+    return bool(_user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000)
+
+
+def get_foreground_window_info() -> dict[str, str]:
+    """Title and process image name of the window the user is working in."""
+    hwnd = _user32.GetForegroundWindow()
+    if not hwnd:
+        return {"title": "", "process": ""}
+    length = _user32.GetWindowTextLengthW(hwnd)
+    buffer = ctypes.create_unicode_buffer(length + 1)
+    _user32.GetWindowTextW(hwnd, buffer, length + 1)
+    process_id = wintypes.DWORD(0)
+    _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+    process_name = ""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    process_handle = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, process_id.value)
+    if process_handle:
+        try:
+            size = wintypes.DWORD(1024)
+            path_buffer = ctypes.create_unicode_buffer(1024)
+            if _kernel32.QueryFullProcessImageNameW(process_handle, 0, path_buffer, ctypes.byref(size)):
+                process_name = path_buffer.value.rsplit("\\", 1)[-1]
+        finally:
+            _kernel32.CloseHandle(process_handle)
+    return {"title": buffer.value, "process": process_name}
+
+
+_user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
+_user32.AttachThreadInput.argtypes = (wintypes.DWORD, wintypes.DWORD, wintypes.BOOL)
+_user32.BringWindowToTop.argtypes = (wintypes.HWND,)
+
+
+def force_foreground_window(hwnd: int) -> bool:
+    """Give keyboard focus to our quick-ask box when a global hotkey opens it.
+
+    Windows only lets the process that received the last input steal the
+    foreground; a hotkey seen by a low-level hook doesn't count. Briefly
+    attaching to the foreground thread's input queue is the documented
+    workaround.
+    """
+    foreground = _user32.GetForegroundWindow()
+    if not foreground or foreground == hwnd:
+        return bool(_user32.SetForegroundWindow(hwnd))
+    foreground_thread = _user32.GetWindowThreadProcessId(foreground, None)
+    our_thread = _kernel32.GetCurrentThreadId()
+    attached = bool(_user32.AttachThreadInput(our_thread, foreground_thread, True))
+    try:
+        _user32.BringWindowToTop(hwnd)
+        return bool(_user32.SetForegroundWindow(hwnd))
+    finally:
+        if attached:
+            _user32.AttachThreadInput(our_thread, foreground_thread, False)

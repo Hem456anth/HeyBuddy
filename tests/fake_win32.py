@@ -63,9 +63,14 @@ def acquire_single_instance_lock(name: str = "") -> bool:
 
 
 class LowLevelKeyboardHook:
+    instances: list = []
+
     def __init__(self, chord_vk_codes: Iterable[Iterable[int]], on_press: Callable[[], None],
-                 on_release: Callable[[], None], on_cancel: Callable[[], None] | None = None) -> None:
+                 on_release: Callable[[], None], on_cancel: Callable[[], None] | None = None,
+                 on_raw_key: Callable[[int, bool], None] | None = None) -> None:
         self.on_press, self.on_release, self.on_cancel = on_press, on_release, on_cancel
+        self.on_raw_key = on_raw_key
+        LowLevelKeyboardHook.instances.append(self)
 
     def start(self) -> None:
         return None
@@ -82,7 +87,7 @@ def chord_display_name(name: str) -> str:
     return name.upper()
 
 
-HOTKEY_PRESETS = {"ctrl+alt": ((0xA2, 0xA3), (0xA4, 0xA5))}
+HOTKEY_PRESETS = {"ctrl+alt": ((0xA2, 0xA3), (0xA4, 0xA5)), "ctrl+win": ((0xA2, 0xA3), (0x5B, 0x5C))}
 
 
 def autostart_command_for_current_process() -> str:
@@ -114,4 +119,41 @@ def get_window_display_affinity(hwnd: int) -> int:
 
 
 def set_window_display_affinity(hwnd: int, affinity: int) -> bool:
+    return True
+
+
+FAKE_CLIPBOARD: list[str] = [""]
+FAKE_PASTED: list[str] = []
+FAKE_MOUSE_DOWN: list[bool] = [False]
+VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU = 0xA2, 0xA3, 0xA4, 0xA5
+VK_LSHIFT, VK_RSHIFT, VK_LWIN, VK_RWIN, VK_ESCAPE = 0xA0, 0xA1, 0x5B, 0x5C, 0x1B
+
+
+def set_clipboard_text(text: str) -> bool:
+    FAKE_CLIPBOARD[0] = text
+    return True
+
+
+def get_clipboard_text() -> str:
+    return FAKE_CLIPBOARD[0]
+
+
+def paste_text_into_focused_window(text: str) -> bool:
+    FAKE_PASTED.append(text)
+    return True
+
+
+def suppress_start_menu_on_win_release() -> None:
+    return None
+
+
+def is_left_mouse_button_down() -> bool:
+    return FAKE_MOUSE_DOWN[0]
+
+
+def get_foreground_window_info() -> dict:
+    return {"title": "Untitled - Notepad", "process": "notepad.exe"}
+
+
+def force_foreground_window(hwnd: int) -> bool:
     return True

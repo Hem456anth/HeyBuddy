@@ -4,8 +4,12 @@ Canonical reference for HeyBuddy's architecture, file layout, conventions and
 Worker contract. Read this first; update it in the same change when you alter
 anything it documents (see *Self-update* at the bottom).
 
-HeyBuddy is the Windows port of [farzaa/clicky](https://github.com/farzaa/clicky).
-`docs/REVERSE_ENGINEERING.md` explains how every Clicky subsystem maps here.
+HeyBuddy is the Windows port of [farzaa/clicky](https://github.com/farzaa/clicky),
+extended in 0.3 with the core behaviour of **HeyClicky for Windows** (reply
+programs that draw on screen, guided click-through steps, tools, background
+jobs, notch, quick-ask, dictation), rebuilt clean-room.
+`docs/REVERSE_ENGINEERING.md` maps Clicky; `docs/HEYCLICKY_TEARDOWN.md` maps
+HeyClicky and lists what was and wasn't reproduced.
 
 ## Overview
 
@@ -14,10 +18,19 @@ floating panel. Holding **Ctrl+Alt** (low-level keyboard hook) streams mic
 PCM to AssemblyAI realtime v3. On release, every monitor is captured
 (≤1280 px JPEG, labeled with its pixel size) and sent with the transcript and
 the last 10 exchanges to Claude through the Cloudflare Worker (`/chat`, SSE).
-Claude replies in speakable text and may append `[POINT:x,y:label:screenN]`
-in screenshot-pixel space; the reply is voiced with ElevenLabs (`/tts`) while a
-blue triangle buddy, which normally rides next to the mouse, flies to each
-point, shows a label bubble and flies back. The client holds **no API keys**.
+Claude answers with a **buddy program** (`say("...")` lines that own marks
+such as `ring`, `arrow`, `target`; see *Buddy program*), may call local
+**tools** (Anthropic tool use, executed client-side with approvals), and may
+hand longer work to a **background job**. Each `say()` line is voiced with
+ElevenLabs (`/tts`) and its marks are drawn on a click-through overlay while
+it plays; `point()` makes the blue triangle buddy fly there. A `target()`
+box waits for the user's click and then starts the next step automatically.
+The client holds **no API keys**.
+
+Other surfaces: the **notch** (black pill, top centre; listening/thinking/
+speaking strip; hover opens the panel), the **quick-ask** box (double-tap
+Ctrl), **dictation** (hold Ctrl+Win, text typed at the caret), the panel's
+**Jobs** tab, and an **Inno Setup** installer.
 
 ## State machine (`src/core/companion_manager.py`)
 
@@ -25,7 +38,9 @@ point, shows a label bubble and flies back. The client holds **no API keys**.
 IDLE ──press──▶ LISTENING ──release──▶ PROCESSING ──audio starts──▶ RESPONDING ──audio ends──▶ IDLE
 LISTENING ──other key pressed with chord──▶ IDLE          (cancel)
 LISTENING ──no speech──▶ IDLE
-PROCESSING/RESPONDING ──press──▶ LISTENING               (interrupt: TTS stops, pointing cancels)
+LISTENING ──released before 0.5 s──▶ IDLE                (accidental brush)
+PROCESSING/RESPONDING ──press / Esc──▶ LISTENING / IDLE  (interrupt: speech queue + drawings cancel)
+IDLE ──Ctrl+Win held──▶ LISTENING (dictating) ──release──▶ PROCESSING ──paste at caret──▶ IDLE
 ANY ──error──▶ ERROR ──▶ IDLE                            (error banner)
 ```
 
@@ -41,7 +56,10 @@ are dropped. History holds completed exchanges only.
 | sounddevice input callback | `core.audio_recorder` | PCM blocks (100 ms) → STT socket (buffered until open) + level meter |
 | `StartCapture` | `CompanionManager` | starts mic, fetches token, opens STT websocket |
 | `AssemblyAIReader` | `api.assemblyai_streaming` | `WebSocketApp.run_forever`, Turn messages |
-| `TurnPipeline` / `TypedTurn` | `CompanionManager` | finalize STT, capture screens, Claude SSE, TTS download |
+| `TurnPipeline` / `TypedTurn` | `CompanionManager` | finalize STT, capture screens, Claude SSE rounds + tool execution |
+| `BeatSpeaker` + `TTS` pool | `core.beat_speaker` | per-line TTS with prefetch, sequential playback, beat-start callbacks |
+| `Job-<id>` | `core.jobs.JobManager` | background job tool loop (one thread per job) |
+| `ClipboardRestore` | `utils.win32` | puts the user's clipboard back after a paste |
 | `AudioPlayer` | `core.audio_player` | ffmpeg MP3 decode + private `sd.OutputStream` |
 | `PystrayThread` | pystray | tray loop; menu callbacks marshal to Qt via `QMetaObject.invokeMethod` |
 
@@ -74,20 +92,58 @@ on the Qt thread; all `ctypes` lives in `src/utils/win32.py`.
 Optional hardening, all off unless set: `APP_SHARED_SECRET` (client header
 `X-HeyBuddy-Key`), `ALLOWED_MODELS`, `MAX_TOKENS_CAP`. Non-POST → 405.
 
-## POINT protocol
+## Buddy program (`src/core/scene_program.py`)
 
+The model answers with one fenced block (or a bare program starting with
+`say(`/`step(`, as HeyClicky's brain does):
+
+```buddy
+say("click export up here")
+ring(1150, 30, 70, 28, "export")
+say("then pick pdf")
+target(900, 120, 300, 40, "PDF")
 ```
-[POINT:none]  [POINT:x,y]  [POINT:x,y:label]  [POINT:x,y:label:screenN]
-```
-Regex: `utils/constants.py::POINT_TAG_PATTERN`. Tags are stripped before
-speaking/display; a half-streamed tag is hidden from the panel.
+
+* Parsed with `ast` (calls with literal args only; nothing is executed).
+  JS habits are accepted: `true/false/null`, trailing `{straight: true}`,
+  semicolons, `step(n)`.
+* Each `say()` starts a **Beat**; marks attach to the latest beat and appear
+  when its audio starts (`beat_started` signal → `overlay.show_beat`).
+* Marks: `point ring frame highlight underline arrow num write trace target`.
+  Control: `clear/startOver/erase` (fade before next beat), `noted` (memory),
+  `seen`, `task` (notch title), `plan`.
+* Coordinates are image pixels of the screenshot; `screen=N` picks image N,
+  default cursor screen. `resolve_marks()` fills `mark.physical`.
+* Legacy `[POINT:x,y:label:screenN]` tags still parse (one beat).
+* `target()` click → `overlay.target_clicked` → after 0.7 s
+  `manager.continue_after_target_click()` sends an `[app] the user clicked …`
+  turn with a fresh screenshot.
+
+## Tools and jobs (`src/core/tools.py`, `src/core/jobs.py`)
+
+* Voice turns get `VOICE_TOOLS`, jobs get `JOB_TOOLS` (Anthropic `tools`
+  schema). `claude_client.run_tool_loop()` streams a round, executes
+  `tool_use` blocks, sends `tool_result`s, repeats (voice ≤ 6 rounds, jobs ≤ 30).
+  Text of every round is spoken as it arrives.
+* `run_command` (PowerShell) and writes outside the working folder/jobs dir
+  go through `config.command_policy` / `write_policy` (`ask|allow|deny`);
+  "ask" uses `ui/approval_dialog.ApprovalBroker` (blocks the worker thread,
+  120 s timeout = no). `is_sensitive_path()` blocks credential stores, SSH/
+  cloud keys, browser profiles, `.env`, HeyBuddy's own settings.
+* Jobs live in `%APPDATA%\HeyBuddy\jobs\<slug>-<id>\{output,tmp,AGENTS.md}`,
+  listed in `jobs.json`; the final message's `ARTIFACTS:` block and
+  `add_artifact` calls register files shown in the Jobs tab.
 
 ## File layout
 
 ```
 HeyBuddy/
 ├── CLAUDE.md, README.md, SECURITY.md, LICENSE
+├── THIRD_PARTY_NOTICES.md            ← dependency inventory + licenses
 ├── docs/REVERSE_ENGINEERING.md       ← Clicky teardown + mapping to Windows
+├── docs/HEYCLICKY_TEARDOWN.md        ← HeyClicky for Windows teardown + parity table
+├── docs/TESTING.md                   ← test plan and latest results
+├── installer/heybuddy.iss            ← Inno Setup per-user installer
 ├── requirements-desktop.txt / requirements-dev.txt
 ├── heybuddy.spec, version_info.txt, build.bat   ← PyInstaller one-file build + self-check
 ├── .github/workflows/windows-build.yml          ← tests, build, self-check exe, release
@@ -99,24 +155,34 @@ HeyBuddy/
     ├── main.py                       ← bootstrap, tray, wiring, --selfcheck
     ├── api/
     │   ├── cloudflare_proxy.py       ← HTTP + SSE transport, UTF-8, access key
-    │   ├── claude_client.py          ← payload (multi-image, history cap), SSE deltas, POINT parsing
+    │   ├── claude_client.py          ← payload (multi-image, history cap), SSE rounds, tool loop
     │   ├── assemblyai_streaming.py   ← v3 WS session + TurnTranscriptAssembler
     │   ├── elevenlabs_client.py      ← /tts wrapper
     │   └── transcription_provider.py ← batch interface (unused fallback surface)
     ├── core/
-    │   ├── companion_manager.py      ← state machine, turn generations, point resolution
+    │   ├── companion_manager.py      ← state machine, turns, tools, dictation, target follow-ups
+    │   ├── scene_program.py          ← buddy program parser + mark resolution
+    │   ├── beat_speaker.py           ← per-line speech queue, beat timing
+    │   ├── tools.py                  ← local tools + safety rules
+    │   ├── jobs.py                   ← background jobs (JobManager)
+    │   ├── memory_store.py           ← local memory.md
     │   ├── buddy_motion.py           ← pure-Python Clicky motion model (follow/fly/point/return)
     │   ├── screen_capture.py         ← all monitors, cursor-first, ≤1280 JPEG, labels
     │   ├── audio_recorder.py         ← sounddevice PCM16 16 kHz mono
     │   ├── audio_player.py           ← bundled ffmpeg decode, private output stream
-    │   ├── hotkey_monitor.py         ← chord → press/release/cancel
+    │   ├── hotkey_monitor.py         ← PTT + dictation chords, double-tap Ctrl, Esc (GestureTracker)
     │   └── chimes.py                 ← start/stop tones
     ├── models/
     │   ├── message.py                ← Message, PointMarker, CapturedScreen
     │   └── config.py                 ← AppConfig (tolerant load, atomic save)
     ├── ui/
-    │   ├── overlay_window.py         ← per-screen click-through buddy overlay
-    │   ├── main_window.py            ← floating panel (chat, status, waveform meter)
+    │   ├── overlay_window.py         ← per-screen click-through buddy + ink overlay, target clicks
+    │   ├── ink_layer.py              ← mark painting + timings (ring, frame, arrow, target…)
+    │   ├── notch_window.py           ← top-centre activity pill
+    │   ├── quick_ask.py              ← double-tap Ctrl text box
+    │   ├── approval_dialog.py        ← thread-safe approval prompts
+    │   ├── jobs_view.py              ← Jobs tab
+    │   ├── main_window.py            ← floating panel (Chat | Jobs tabs, status, waveform meter)
     │   ├── settings_panel.py         ← settings dialog + diagnostics
     │   └── theme.py                  ← design tokens
     ├── tools/
@@ -143,6 +209,15 @@ HeyBuddy/
 | `save_recordings` | `false` | keep `.wav` per question |
 | `transcription.speech_model` | `universal-streaming-english` | AssemblyAI model |
 | `audio.chunk_size` | `1600` | samples per block (100 ms) |
+| `tools_enabled` | `true` | model may call local tools |
+| `command_policy` / `write_policy` | `ask` | `ask`, `allow` or `deny` |
+| `background_jobs_enabled` / `speak_job_results` | `true` | jobs + spoken result |
+| `memory_enabled` | `true` | `memory.md` + `remember`/`noted` |
+| `annotations_enabled` / `annotation_linger_seconds` | `true` / `12` | drawings and how long they stay |
+| `guided_steps_enabled` | `true` | `target()` waits for the click and continues |
+| `dictation_enabled` / `dictation_hotkey` | `true` / `ctrl+win` | hold to dictate |
+| `quick_ask_enabled` | `true` | double-tap Ctrl box |
+| `notch_enabled` | `true` | notch window (restart to apply) |
 
 `HEYBUDDY_HOME` overrides the data directory (tests, portable use).
 
@@ -168,6 +243,10 @@ build.bat                                # tests + PyInstaller + self-check of t
 * Pure logic (parsing, mapping, motion) stays Qt- and Win32-free so it is
   unit-testable on any OS.
 * Never ship API keys; everything goes through the Worker.
+* No HeyClicky code, prompts, scripts or assets: behaviour is reproduced from
+  the teardown with original code.
+* Every new capability that acts on the PC goes through `core/tools.py`
+  and its policy gates.
 
 ## Self-update
 

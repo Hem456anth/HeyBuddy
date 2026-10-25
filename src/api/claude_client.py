@@ -196,3 +196,170 @@ def strip_point_tags_for_display(partial_text: str) -> str:
 
 def _clean_spoken_text(text: str) -> str:
     return _WHITESPACE_RUN_RE.sub(" ", text).strip()
+
+
+# ---------------------------------------------------------------------------
+# Tool use (HeyBuddy 0.3): streamed rounds with client-side tool execution
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass, field  # noqa: E402
+
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    input: dict
+
+
+@dataclass
+class RoundResult:
+    text: str
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    stop_reason: str = ""
+    content_blocks: list[dict] = field(default_factory=list)
+
+
+class _RoundAccumulator:
+    """Rebuilds the assistant message from Anthropic SSE events."""
+
+    def __init__(self) -> None:
+        self.blocks: dict[int, dict] = {}
+        self.json_parts: dict[int, list[str]] = {}
+        self.stop_reason = ""
+
+    def feed(self, data_payload: str) -> str:
+        """Consume one event; return any new visible text."""
+        if not data_payload or data_payload == "[DONE]":
+            return ""
+        try:
+            obj = json.loads(data_payload)
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(obj, dict):
+            return ""
+        kind = obj.get("type")
+        if kind == "error":
+            info = obj.get("error") or {}
+            message = info.get("message") if isinstance(info, dict) else str(info)
+            raise RuntimeError(f"Claude stream error: {message or info}")
+        index = int(obj.get("index", 0) or 0)
+        if kind == "content_block_start":
+            block = dict(obj.get("content_block") or {})
+            if block.get("type") == "text":
+                block["text"] = block.get("text", "")
+            if block.get("type") == "tool_use":
+                block["input"] = {}
+                self.json_parts[index] = []
+            self.blocks[index] = block
+            return block.get("text", "") if block.get("type") == "text" else ""
+        if kind == "content_block_delta":
+            delta = obj.get("delta") or {}
+            block = self.blocks.setdefault(index, {"type": "text", "text": ""})
+            if delta.get("type") == "text_delta":
+                piece = delta.get("text", "") or ""
+                block["text"] = block.get("text", "") + piece
+                return piece
+            if delta.get("type") == "input_json_delta":
+                self.json_parts.setdefault(index, []).append(delta.get("partial_json", "") or "")
+            return ""
+        if kind == "content_block_stop":
+            block = self.blocks.get(index)
+            if block and block.get("type") == "tool_use":
+                raw = "".join(self.json_parts.get(index, []))
+                try:
+                    block["input"] = json.loads(raw) if raw.strip() else {}
+                except json.JSONDecodeError:
+                    block["input"] = {"_unparsed": raw}
+            return ""
+        if kind == "message_delta":
+            delta = obj.get("delta") or {}
+            if delta.get("stop_reason"):
+                self.stop_reason = delta["stop_reason"]
+        return ""
+
+    def result(self) -> RoundResult:
+        ordered = [self.blocks[i] for i in sorted(self.blocks)]
+        content = []
+        calls = []
+        text_parts = []
+        for block in ordered:
+            if block.get("type") == "text":
+                if block.get("text"):
+                    content.append({"type": "text", "text": block["text"]})
+                    text_parts.append(block["text"])
+            elif block.get("type") == "tool_use":
+                content.append({"type": "tool_use", "id": block.get("id", ""), "name": block.get("name", ""),
+                                "input": block.get("input") or {}})
+                calls.append(ToolCall(block.get("id", ""), block.get("name", ""), block.get("input") or {}))
+        return RoundResult("".join(text_parts), calls, self.stop_reason, content)
+
+
+def stream_round(
+    client: ClaudeClient,
+    payload: dict,
+    on_text: Callable[[str], None] | None = None,
+    should_continue: Callable[[], bool] | None = None,
+) -> RoundResult:
+    accumulator = _RoundAccumulator()
+    for sse_event in client.proxy.chat_stream(payload):
+        if should_continue is not None and not should_continue():
+            break
+        piece = accumulator.feed(sse_event.data)
+        if piece and on_text is not None:
+            try:
+                on_text(piece)
+            except Exception:
+                log.exception("on_text callback raised")
+    return accumulator.result()
+
+
+def run_tool_loop(
+    client: ClaudeClient,
+    payload: dict,
+    execute: Callable[[ToolCall], tuple[str, bool]],
+    on_round_text: Callable[[str, bool], None] | None = None,
+    on_text: Callable[[str], None] | None = None,
+    should_continue: Callable[[], bool] | None = None,
+    max_rounds: int = 8,
+) -> list[str]:
+    """Run model rounds until it stops calling tools.
+
+    `execute(call) -> (output, is_error)`. `on_round_text(text, more_coming)`
+    fires after every round that produced text, so the caller can start
+    speaking a "let me check" line while tools run. Returns every round's
+    text, in order.
+    """
+    messages = list(payload["messages"])
+    texts: list[str] = []
+    for round_number in range(max_rounds):
+        round_payload = dict(payload, messages=messages)
+        if round_number == max_rounds - 1:
+            round_payload.pop("tools", None)  # force a final answer
+            round_payload.pop("tool_choice", None)
+        result = stream_round(client, round_payload, on_text=on_text, should_continue=should_continue)
+        if should_continue is not None and not should_continue():
+            break
+        wants_tools = result.stop_reason == "tool_use" and bool(result.tool_calls)
+        if result.text.strip():
+            texts.append(result.text)
+            if on_round_text is not None:
+                on_round_text(result.text, wants_tools)
+        if not wants_tools:
+            break
+        messages.append({"role": "assistant", "content": result.content_blocks})
+        tool_results = []
+        for call in result.tool_calls:
+            if should_continue is not None and not should_continue():
+                return texts
+            try:
+                output, is_error = execute(call)
+            except Exception as error:  # a tool must never kill the turn
+                log.exception("Tool %s crashed", call.name)
+                output, is_error = f"tool crashed: {error}", True
+            tool_results.append({
+                "type": "tool_result", "tool_use_id": call.id,
+                "content": output or "(no output)", "is_error": bool(is_error),
+            })
+        messages.append({"role": "user", "content": tool_results})
+    return texts

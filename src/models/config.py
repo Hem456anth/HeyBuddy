@@ -102,6 +102,33 @@ class AppConfig:
     # `APP_SHARED_SECRET` set. Not a strong secret (it ships in the client
     # config) but it stops drive-by abuse of a public Worker URL.
     worker_shared_secret: str = ""
+
+    # ----- HeyBuddy 0.3: HeyClicky-parity features (all local, all optional) -----
+    # Let the model call local tools (open links, copy, type, files, shell).
+    tools_enabled: bool = True
+    # "ask" (default) | "allow" | "deny" for PowerShell commands.
+    command_policy: str = "ask"
+    # "ask" | "allow" | "deny" for file writes outside HeyBuddy's own folders.
+    write_policy: str = "ask"
+    # Hand longer work to background jobs (Jobs tab).
+    background_jobs_enabled: bool = True
+    # Read the first sentence of a finished job aloud.
+    speak_job_results: bool = True
+    # Keep a local memory.md of facts the user asks the buddy to remember.
+    memory_enabled: bool = True
+    # Draw rings, arrows, highlights... on screen while speaking.
+    annotations_enabled: bool = True
+    # Seconds marks stay after the answer ends (they also clear on a new turn).
+    annotation_linger_seconds: float = 12.0
+    # target(...) boxes wait for the user's click and continue the walkthrough.
+    guided_steps_enabled: bool = True
+    # Hold this chord to dictate: speech is typed where the caret is.
+    dictation_enabled: bool = True
+    dictation_hotkey: str = "ctrl+win"
+    # Double-tap Ctrl opens a small "ask" box next to the notch.
+    quick_ask_enabled: bool = True
+    # Black pill at the top of the screen showing listening/thinking/speaking.
+    notch_enabled: bool = True
     audio: AudioConfig = field(default_factory=AudioConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)

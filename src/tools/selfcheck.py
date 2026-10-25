@@ -57,6 +57,40 @@ def _make_test_mp3() -> bytes:
     return completed.stdout if completed.returncode == 0 else b""
 
 
+def build_sse_events(reply: Any) -> list[tuple[str, dict]]:
+    """Anthropic-style SSE for a mock reply.
+
+    `reply` is either the reply text, or a dict
+    `{"text": "...", "tool_use": {"id", "name", "input"}}` for a round that
+    calls a tool (stop_reason tool_use).
+    """
+    text = reply if isinstance(reply, str) else str(reply.get("text", ""))
+    tool_use = None if isinstance(reply, str) else reply.get("tool_use")
+    events: list[tuple[str, dict]] = [("message_start", {"type": "message_start"})]
+    if text:
+        events.append(("content_block_start", {"type": "content_block_start", "index": 0,
+                                               "content_block": {"type": "text", "text": ""}}))
+        # Split mid-tag on purpose to exercise partial-tag hiding.
+        for start in range(0, len(text), 7):
+            events.append(("content_block_delta", {
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": text[start:start + 7]},
+            }))
+        events.append(("content_block_stop", {"type": "content_block_stop", "index": 0}))
+    if tool_use:
+        raw = json.dumps(tool_use.get("input", {}))
+        events.append(("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {
+            "type": "tool_use", "id": tool_use.get("id", "toolu_selfcheck"), "name": tool_use["name"], "input": {}}}))
+        for start in range(0, len(raw), 9):
+            events.append(("content_block_delta", {"type": "content_block_delta", "index": 1,
+                                                   "delta": {"type": "input_json_delta", "partial_json": raw[start:start + 9]}}))
+        events.append(("content_block_stop", {"type": "content_block_stop", "index": 1}))
+    events.append(("message_delta", {"type": "message_delta",
+                                     "delta": {"stop_reason": "tool_use" if tool_use else "end_turn"}}))
+    events.append(("message_stop", {"type": "message_stop"}))
+    return events
+
+
 class _MockWorker:
     """Speaks the real Worker contract: /chat (SSE), /tts, /transcribe-token."""
 
@@ -80,14 +114,7 @@ class _MockWorker:
                     self.send_response(200)
                     self.send_header("content-type", "text/event-stream")
                     self.end_headers()
-                    events = [("message_start", {"type": "message_start"})]
-                    # Split mid-tag on purpose to exercise partial-tag hiding.
-                    for start in range(0, len(reply_text), 7):
-                        events.append(("content_block_delta", {
-                            "type": "content_block_delta", "index": 0,
-                            "delta": {"type": "text_delta", "text": reply_text[start:start + 7]},
-                        }))
-                    events.append(("message_stop", {"type": "message_stop"}))
+                    events = build_sse_events(reply_text)
                     for name, data in events:
                         self.wfile.write(f"event: {name}\ndata: {json.dumps(data)}\n\n".encode("utf-8"))
                         self.wfile.flush()
@@ -145,6 +172,7 @@ def run_selfcheck(
     overlay: Any,
     panel: Any,
     duration_seconds: float = 6.0,
+    jobs: Any = None,
 ) -> int:
     import mss
     from PIL import Image
@@ -304,6 +332,21 @@ def run_selfcheck(
     ), {"states": states_seen, "errors": errors})
     record("no_pipeline_errors", not [error for error in errors if "Voice unavailable" not in error], errors)
 
+    # 6. HeyBuddy 0.3: tool round + buddy program (ink + guided target)
+    try:
+        _check_program_and_tools(qt_app, config, manager, overlay, mock_worker, screens, record)
+    except Exception as phase_error:
+        log.exception("program/tools phase crashed")
+        record("program_phase", False, repr(phase_error))
+
+    # 7. background job with a file artifact
+    if jobs is not None:
+        try:
+            _check_background_job(qt_app, jobs, mock_worker, record)
+        except Exception as job_error:
+            log.exception("job phase crashed")
+            record("background_job_done", False, repr(job_error))
+
     _pump(qt_app, max(0.0, duration_seconds - 3.0))
     mock_worker.close()
     results["passed"] = not required_failures
@@ -314,3 +357,127 @@ def run_selfcheck(
         sys.stdout.flush()
     overlay.shutdown()
     return 0 if not required_failures else 1
+
+
+def _image_size_from_payload(payload: dict) -> tuple[int, int]:
+    for message in reversed(payload.get("messages") or []):
+        content = message.get("content")
+        if isinstance(content, str):
+            continue
+        for block in content:
+            text = block.get("text", "") if isinstance(block, dict) else ""
+            if "image dimensions: " in text:  # cursor screen is always first
+                width_text, height_text = text.split("image dimensions: ")[1].split(" pixels")[0].split("x")
+                return int(width_text), int(height_text)
+    return 200, 200
+
+
+def _has_tool_result(payload: dict) -> bool:
+    last = payload["messages"][-1]["content"] if payload.get("messages") else ""
+    return isinstance(last, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in last)
+
+
+def _check_program_and_tools(qt_app, config, manager, overlay, mock_worker, screens, record) -> None:
+    import mss
+    from PIL import Image
+
+    _wait_until(qt_app, lambda: manager.state == CompanionState.IDLE, 15.0)
+    overlay.clear_ink()
+    _pump(qt_app, 0.6)
+    config.tools_enabled = True
+    config.annotations_enabled = True
+    config.annotation_linger_seconds = 30.0
+    requests_before = len(mock_worker.chat_requests)
+    geometry: dict[str, int] = {}
+
+    def program_reply(payload: dict) -> Any:
+        width, height = _image_size_from_payload(payload)
+        cx, cy = width // 2, height // 2
+        geometry.update(cx=cx, cy=cy, width=width, height=height)
+        if not _has_tool_result(payload):
+            return {"text": '```buddy\nsay("let me check which app you are in")\n```',
+                    "tool_use": {"id": "toolu_window", "name": "get_active_window", "input": {}}}
+        return (
+            "```buddy\n"
+            'step(1);\n'
+            'say("this is the middle of your screen.");\n'
+            f'ring({cx - 90}, {cy - 45}, 180, 90, "middle");\n'
+            'say("click this box to continue.");\n'
+            f'target({cx - 70}, {cy + 70}, 140, 44, "continue");\n'
+            'noted("Ran the HeyBuddy self-check.");\n'
+            "```"
+        )
+
+    mock_worker.reply_text_factory = program_reply
+    beats: list[Any] = []
+    manager.beat_started.connect(lambda beat: beats.append(beat))
+    manager.send_text("show me the middle of my screen", include_screenshot=True)
+    got_marks = _wait_until(qt_app, lambda: any(m.kind == "target" for b in beats for m in b.marks), 25.0)
+    phase_requests = mock_worker.chat_requests[requests_before:]
+    tool_round_ok = len(phase_requests) >= 2 and _has_tool_result(phase_requests[1]) and bool(phase_requests[0].get("tools"))
+    record("tool_round_trip", tool_round_ok, {
+        "requests": len(phase_requests),
+        "tools_offered": len(phase_requests[0].get("tools", [])) if phase_requests else 0,
+    })
+    kinds = [m.kind for b in beats for m in b.marks]
+    record("buddy_program_beats", got_marks and "ring" in kinds and "target" in kinds,
+           {"beats": [b.text for b in beats], "marks": kinds})
+    _pump(qt_app, 1.0)  # strokes finish drawing
+    ring = next((live for live in overlay.ink.marks if live.mark.kind == "ring"), None)
+    record("ink_marks_live", ring is not None, len(overlay.ink.marks))
+    targets = overlay.ink.armed_targets()
+    if targets:
+        left, top, width, height = targets[0].physical_rect()
+        record("target_hit_test", overlay.ink.hit_target(left + width / 2, top + height / 2) is targets[0]
+               and overlay.ink.hit_target(left - 200, top - 200) is None, targets[0].mark.label)
+    else:
+        record("target_hit_test", False, "no armed target")
+    if ring is not None:
+        left, top, width, height = ring.physical_rect()
+        region = {"left": int(left) - 20, "top": int(top) - 20, "width": int(width) + 40, "height": int(height) + 40}
+        with mss.mss() as grabber:
+            hidden = grabber.grab(region)
+            hidden_image = Image.frombytes("RGB", hidden.size, hidden.rgb)
+            for window in overlay._windows:  # noqa: SLF001
+                win32.set_window_display_affinity(int(window.winId()), win32.WDA_NONE)
+            _pump(qt_app, 0.3)
+            visible_image = None
+            for _attempt in range(4):
+                grab = grabber.grab(region)
+                candidate = Image.frombytes("RGB", grab.size, grab.rgb)
+                if visible_image is None or _count_buddy_blue_pixels(candidate) > _count_buddy_blue_pixels(visible_image):
+                    visible_image = candidate
+                _pump(qt_app, 0.15)
+            for window in overlay._windows:  # noqa: SLF001
+                win32.exclude_window_from_capture(int(window.winId()))
+        hidden_image.save(OUTPUT_DIR / "ink_region_capture_excluded.png")
+        visible_image.save(OUTPUT_DIR / "ink_region_visible.png")
+        visible_blue = _count_buddy_blue_pixels(visible_image)
+        hidden_blue = _count_buddy_blue_pixels(hidden_image)
+        record("ink_rendered_on_screen", visible_blue > 60, {"blue_pixels": visible_blue})
+        record("ink_hidden_from_capture", hidden_blue < max(10, visible_blue // 10),
+               {"blue_pixels_when_excluded": hidden_blue}, required=False)
+    memory = getattr(manager, "memory", None)
+    record("noted_fact_saved", memory is not None and any("self-check" in fact for fact in memory.facts()),
+           memory.facts()[-1:] if memory else None)
+    overlay.clear_ink()
+
+
+def _check_background_job(qt_app, jobs, mock_worker, record) -> None:
+    def job_reply(payload: dict) -> Any:
+        system = str(payload.get("system", ""))
+        folder = system.split("your working folder: ", 1)[1].strip().splitlines()[0] if "your working folder: " in system else ""
+        if not _has_tool_result(payload):
+            return {"text": "", "tool_use": {"id": "toolu_write", "name": "write_file", "input": {
+                "path": "output/selfcheck-report.txt", "content": "HeyBuddy background job self-check\n"}}}
+        return f"done, the report is in output.\nARTIFACTS:\n{Path(folder) / 'output' / 'selfcheck-report.txt'}"
+
+    mock_worker.reply_text_factory = job_reply
+    finished: list[Any] = []
+    jobs.job_finished.connect(lambda job: finished.append(job))
+    job_id = jobs.start("Self check", "Write a one-line report file.")
+    _wait_until(qt_app, lambda: bool(finished) or not jobs.get(job_id).is_active, 25.0)
+    job = jobs.get(job_id)
+    record("background_job_done", job is not None and job.status == "done"
+           and bool(job.artifacts) and Path(job.artifacts[0]).is_file(),
+           None if job is None else {"status": job.status, "artifacts": job.artifacts, "error": job.error})

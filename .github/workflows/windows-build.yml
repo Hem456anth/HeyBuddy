@@ -13,7 +13,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -54,20 +54,62 @@ jobs:
           ./scripts/report-selfcheck.ps1 -ReportPath selfcheck-exe\selfcheck\selfcheck.json -Label "exe"
           if ($process.ExitCode -ne 0) { exit 1 }
 
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
+          if (-not $iscc) {
+            $candidates = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe")
+            $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $found) { choco install innosetup -y --no-progress | Out-Null; $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1 }
+            $iscc = $found
+          } else { $iscc = $iscc.Source }
+          & $iscc /Q /DAppVersion=0.3.0 /DSourceExe=..\dist\HeyBuddy.exe installer\heybuddy.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-Item dist\HeyBuddy-Setup-0.3.0.exe | ForEach-Object { Write-Output "::notice title=installer::$($_.Name) $([math]::Round($_.Length/1MB,1)) MB" }
+
+      - name: Install silently, self-check the installed copy, uninstall
+        shell: pwsh
+        run: |
+          $setup = Start-Process -FilePath dist\HeyBuddy-Setup-0.3.0.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/CURRENTUSER","/TASKS=desktopicon" -PassThru -Wait
+          if ($setup.ExitCode -ne 0) { Write-Output "::error title=installer::exit $($setup.ExitCode)"; exit 1 }
+          $installed = "$env:LOCALAPPDATA\Programs\HeyBuddy\HeyBuddy.exe"
+          $shortcut = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\HeyBuddy\HeyBuddy.lnk"
+          if (-not (Test-Path $installed)) { Write-Output "::error title=installer::HeyBuddy.exe not installed"; exit 1 }
+          if (-not (Test-Path $shortcut)) { Write-Output "::error title=installer::Start menu shortcut missing"; exit 1 }
+          Write-Output "::notice title=installer::installed to $installed with Start menu shortcut"
+          $env:HEYBUDDY_HOME = "$PWD\selfcheck-installed"
+          $process = Start-Process -FilePath $installed -ArgumentList "--selfcheck","--selfcheck-seconds=4" -PassThru -Wait
+          ./scripts/report-selfcheck.ps1 -ReportPath selfcheck-installed\selfcheck\selfcheck.json -Label "installed"
+          if ($process.ExitCode -ne 0) { exit 1 }
+          $uninstaller = Get-ChildItem "$env:LOCALAPPDATA\Programs\HeyBuddy\unins*.exe" | Select-Object -First 1
+          $uninstall = Start-Process -FilePath $uninstaller.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -PassThru -Wait
+          Start-Sleep -Seconds 2
+          if (Test-Path $installed) { Write-Output "::error title=uninstaller::HeyBuddy.exe still present"; exit 1 }
+          Write-Output "::notice title=uninstaller::removed cleanly (exit $($uninstall.ExitCode))"
+
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release | Out-Null
           Copy-Item dist\HeyBuddy.exe release\
-          Copy-Item README.md, SECURITY.md, LICENSE -Destination release\ -ErrorAction SilentlyContinue
+          Copy-Item README.md, SECURITY.md, LICENSE, THIRD_PARTY_NOTICES.md -Destination release\ -ErrorAction SilentlyContinue
           Compress-Archive -Path release\* -DestinationPath HeyBuddy-windows-x64.zip -Force
+          Copy-Item dist\HeyBuddy-Setup-0.3.0.exe .
+          $lines = @()
+          foreach ($file in @("dist\HeyBuddy.exe", "HeyBuddy-Setup-0.3.0.exe", "HeyBuddy-windows-x64.zip")) {
+            $lines += "$((Get-FileHash $file -Algorithm SHA256).Hash)  $(Split-Path $file -Leaf)"
+          }
+          $lines | Out-File SHA256SUMS.txt -Encoding ascii
           (Get-FileHash dist\HeyBuddy.exe -Algorithm SHA256).Hash | Out-File HeyBuddy.exe.sha256
 
       - uses: actions/upload-artifact@v4
         with:
           name: HeyBuddy-windows-x64
           path: |
+            HeyBuddy-Setup-0.3.0.exe
             HeyBuddy-windows-x64.zip
+            SHA256SUMS.txt
             HeyBuddy.exe.sha256
 
       - uses: actions/upload-artifact@v4
@@ -77,6 +119,7 @@ jobs:
           path: |
             selfcheck-source/selfcheck/**
             selfcheck-exe/selfcheck/**
+            selfcheck-installed/selfcheck/**
             selfcheck-*/logs/**
 
       - name: Publish release (tags)
@@ -84,24 +127,32 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            HeyBuddy-Setup-0.3.0.exe
             HeyBuddy-windows-x64.zip
+            SHA256SUMS.txt
             HeyBuddy.exe.sha256
 
       - name: Publish preview pre-release (windows-port-v2 branch)
         if: github.ref == 'refs/heads/windows-port-v2'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.2.0-preview
+          tag_name: v0.3.0-preview
           target_commitish: ${{ github.sha }}
-          name: HeyBuddy 0.2.0 preview (Windows x64)
+          name: HeyBuddy 0.3.0 preview (Windows x64)
           prerelease: true
           body: |
-            Built and self-checked on windows-latest from ${{ github.sha }}.
-            Unzip and run HeyBuddy.exe, then paste your Cloudflare Worker URL in Settings.
-            Unsigned: SmartScreen -> More info -> Run anyway.
+            Built, installed, self-checked and uninstalled on windows-latest from ${{ github.sha }}.
+            Easiest: run HeyBuddy-Setup-0.3.0.exe (per-user, no admin). Portable: unzip and run HeyBuddy.exe.
+            Then paste your Cloudflare Worker URL in Settings (see README).
+            Unsigned: SmartScreen -> More info -> Run anyway. Verify downloads with SHA256SUMS.txt.
           files: |
+            HeyBuddy-Setup-0.3.0.exe
             HeyBuddy-windows-x64.zip
+            SHA256SUMS.txt
             HeyBuddy.exe.sha256
             selfcheck-exe/selfcheck/selfcheck.json
             selfcheck-exe/selfcheck/buddy_region_visible.png
             selfcheck-exe/selfcheck/buddy_region_capture_excluded.png
+            selfcheck-exe/selfcheck/ink_region_visible.png
+            selfcheck-exe/selfcheck/ink_region_capture_excluded.png
+            selfcheck-installed/selfcheck/selfcheck.json

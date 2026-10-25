@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import signal
 import sys
 import threading
@@ -27,7 +28,7 @@ from pathlib import Path
 
 import pystray
 from PIL import Image, ImageDraw
-from PyQt6.QtCore import QMetaObject, Qt, QTimer
+from PyQt6.QtCore import QMetaObject, QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
 # Make `python src/main.py` work as well as `python -m src.main`. The
@@ -44,11 +45,16 @@ from src.core.audio_player import AudioPlayer
 from src.core.audio_recorder import AudioRecorder
 from src.core.companion_manager import CompanionManager, CompanionState
 from src.core.hotkey_monitor import HotkeyMonitor
+from src.core.jobs import JobManager
+from src.core.memory_store import MemoryStore
 from src.core.screen_capture import ScreenCapture
 from src.models.config import AppConfig
 from src.ui import theme
 from src.ui.main_window import MainPanel
+from src.ui.approval_dialog import ApprovalBroker
+from src.ui.notch_window import NotchWindow
 from src.ui.overlay_window import BuddyOverlayController
+from src.ui.quick_ask import QuickAskWindow
 from src.utils.constants import APP_NAME, APP_VERSION, USER_DATA_DIR
 from src.utils.logger import get_logger
 from src.utils.win32 import acquire_single_instance_lock, enable_per_monitor_dpi_awareness
@@ -146,6 +152,13 @@ def _build_tray_icon(
         except Exception:
             log.exception("Failed to save show_cursor_buddy")
 
+    def on_open_jobs(_icon, _item):
+        _invoke_on_qt_thread(panel, "show_jobs_tab")
+
+    def on_report_bug(_icon, _item):
+        import webbrowser
+        webbrowser.open("https://github.com/Hem456anth/HeyBuddy/issues/new")
+
     def on_clear_conversation(_icon, _item):
         _invoke_on_qt_thread(manager, "clear_history")
 
@@ -177,9 +190,11 @@ def _build_tray_icon(
             on_toggle_cursor_buddy,
             checked=lambda _item: config.show_cursor_buddy,
         ),
+        pystray.MenuItem("Jobs", on_open_jobs),
         pystray.MenuItem("Clear Conversation", on_clear_conversation),
         pystray.MenuItem("Settings", on_open_settings),
         pystray.MenuItem("Open Logs and Settings Folder", on_open_data_folder),
+        pystray.MenuItem("Report a Bug", on_report_bug),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Quit", on_quit),
     )
@@ -244,6 +259,13 @@ def main() -> int:
     tts = ElevenLabsClient(proxy=proxy)
     player = AudioPlayer()
 
+    approvals = ApprovalBroker()
+    memory = MemoryStore()
+    jobs = JobManager(
+        claude=claude,
+        approve=approvals.approve,
+        policies=lambda: (config.command_policy, config.write_policy),
+    )
     manager = CompanionManager(
         config=config,
         recorder=recorder,
@@ -252,16 +274,51 @@ def main() -> int:
         claude=claude,
         tts=tts,
         player=player,
+        memory=memory,
+        jobs=jobs,
+        approve=approvals.approve,
     )
 
     panel = MainPanel(config, manager)
+    panel.attach_jobs(jobs)
     overlay = BuddyOverlayController(config)
     queued = Qt.ConnectionType.QueuedConnection
     manager.state_changed.connect(overlay.set_companion_state, queued)
     manager.audio_level_changed.connect(overlay.set_audio_level, queued)
     manager.pointing_requested.connect(overlay.show_pointing, queued)
     manager.turn_interrupted.connect(overlay.cancel_pointing, queued)
+    manager.beat_started.connect(overlay.show_beat, queued)
+    manager.speech_finished.connect(overlay.on_speech_finished, queued)
+    overlay.target_clicked.connect(
+        lambda label: QTimer.singleShot(700, lambda: manager.continue_after_target_click(label)), queued,
+    )
     panel.overlay = overlay
+
+    notch = None
+    if config.notch_enabled:
+        notch = NotchWindow()
+        manager.state_changed.connect(notch.set_state, queued)
+        manager.audio_level_changed.connect(notch.set_level, queued)
+        manager.transcription_partial.connect(notch.set_caption, queued)
+        manager.assistant_partial.connect(notch.set_caption, queued)
+        manager.task_changed.connect(lambda title: notch.flash_job(title, 20.0), queued)
+        notch.hover_opened.connect(lambda: (panel.show(), panel.raise_()))
+        notch.clicked.connect(panel.toggle)
+        notch.show()
+
+    quick_ask = QuickAskWindow()
+    quick_ask.submitted.connect(lambda text: manager.send_text(text, include_screenshot=config.screen_capture_enabled))
+
+    def _on_job_finished(job) -> None:
+        chimes.play_start_chime()
+        line = job.summary_line
+        if notch is not None:
+            notch.flash_job(f"{job.title}: {line}", 8.0)
+        if config.speak_job_results and job.status == "done":
+            first_sentence = re.split(r"(?<=[.!?])\s", line, maxsplit=1)[0]
+            manager.announce(f"{job.title} is done. {first_sentence}")
+
+    jobs.job_finished.connect(_on_job_finished, queued)
 
     if options["selfcheck"]:
         from src.tools.selfcheck import run_selfcheck
@@ -272,13 +329,35 @@ def main() -> int:
             overlay=overlay,
             panel=panel,
             duration_seconds=float(options["selfcheck_seconds"]),
+            jobs=jobs,
         )
 
+    class _HotkeyBridge(QObject):
+        """Hook-thread callbacks -> UI thread (quick ask needs widgets)."""
+        quick_ask_requested = pyqtSignal()
+        escape_pressed = pyqtSignal()
+
+    bridge = _HotkeyBridge()
+    bridge.quick_ask_requested.connect(
+        lambda: quick_ask.open_near_notch() if config.quick_ask_enabled else None, queued,
+    )
+
+    def _on_escape() -> None:
+        if manager.state != CompanionState.IDLE or overlay.ink.has_marks:
+            QTimer.singleShot(0, manager.cancel)
+            QTimer.singleShot(0, overlay.clear_ink)
+
+    bridge.escape_pressed.connect(_on_escape, queued)
     hotkey = HotkeyMonitor(
         on_press=manager.begin_listening,
         on_release=manager.end_listening_and_process,
         on_cancel=manager.cancel_listening,
         chord_name=config.hotkey,
+        on_dictation_press=manager.begin_dictation,
+        on_dictation_release=manager.end_dictation,
+        dictation_chord_name=config.dictation_hotkey if config.dictation_enabled else None,
+        on_double_tap_ctrl=bridge.quick_ask_requested.emit,
+        on_escape=bridge.escape_pressed.emit,
     )
     hotkey.start()
     # Exposed so the Settings dialog can rebind the chord without a restart.
@@ -328,6 +407,7 @@ def main() -> int:
         return qt_app.exec()
     finally:
         hotkey.stop()
+        jobs.cancel_all()
         manager.cancel()
         overlay.shutdown()
         try:

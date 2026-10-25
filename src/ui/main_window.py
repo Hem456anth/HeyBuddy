@@ -54,6 +54,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -504,7 +505,14 @@ class MainPanel(QWidget):
         self.scroll.setWidget(self.chat_container)
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        root.addWidget(self.scroll, 1)
+        # Chat | Jobs tabs (Jobs is filled in by `attach_jobs`).
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.addTab(self.scroll, "Chat")
+        self.jobs_page = QWidget()
+        QVBoxLayout(self.jobs_page).setContentsMargins(0, 0, 0, 0)
+        self.tabs.addTab(self.jobs_page, "Jobs")
+        root.addWidget(self.tabs, 1)
 
         # ---- composer ----
         composer = QHBoxLayout()
@@ -735,6 +743,28 @@ class MainPanel(QWidget):
         self.manager.send_text(
             text, include_screenshot=self.config.screen_capture_enabled,
         )
+
+    def attach_jobs(self, jobs) -> None:
+        """Called by main.py once the JobManager exists."""
+        from .jobs_view import JobsView
+        self.jobs_view = JobsView(jobs, self.jobs_page)
+        self.jobs_page.layout().addWidget(self.jobs_view)
+
+        def update_tab_title(_job=None) -> None:
+            active = sum(1 for job in jobs.jobs() if job.is_active)
+            unseen = sum(1 for job in jobs.jobs() if not job.is_active and not job.seen)
+            suffix = f" ({active} running)" if active else (f" ({unseen} new)" if unseen else "")
+            self.tabs.setTabText(1, "Jobs" + suffix)
+
+        jobs.job_changed.connect(update_tab_title, Qt.ConnectionType.QueuedConnection)
+        update_tab_title()
+
+    @pyqtSlot()
+    def show_jobs_tab(self) -> None:
+        self.tabs.setCurrentIndex(1)
+        if not self.isVisible():
+            self.show()
+            self.raise_()
 
     @pyqtSlot()
     def open_settings(self) -> None:

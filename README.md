@@ -1,9 +1,16 @@
 # HeyBuddy
 
-A native Windows port of [farzaa/clicky](https://github.com/farzaa/clicky): an
-AI buddy that lives in your system tray, sees your screen, listens while you
-hold **Ctrl+Alt**, answers out loud, and flies a little blue cursor to the
-button you're looking for.
+A native Windows AI screen companion. It lives in your system tray, sees your
+screen, listens while you hold **Ctrl+Alt**, answers out loud, **draws on
+your screen** while it explains (rings, arrows, highlights), walks you through
+tasks one click at a time, acts on your PC when you ask (open links, type,
+files, PowerShell, with your approval), and hands bigger jobs to background
+helpers.
+
+It started as a Windows port of [farzaa/clicky](https://github.com/farzaa/clicky)
+and in 0.3 gained the core experience of **HeyClicky for Windows**, rebuilt
+clean-room from a reverse-engineering study
+([docs/HEYCLICKY_TEARDOWN.md](docs/HEYCLICKY_TEARDOWN.md)).
 
 ![states: following, listening, thinking, pointing](docs/buddy-states.png)
 
@@ -19,9 +26,34 @@ button you're looking for.
 3. Claude answers out loud (ElevenLabs). If something on screen matters, the
    buddy swoops over to it, shows a little label, then flies back.
 
+4. While it talks it draws: a loop around the button, an arrow to the menu,
+   a highlight on the line that matters. Each drawing appears with the
+   sentence that mentions it.
+5. Ask "walk me through it" and it gives one step at a time, outlines the
+   exact control to click, waits for your click, then continues.
+6. Ask it to *do* something ("copy that address", "open the docs", "what's
+   in my Downloads?") and it uses local tools. Commands and file writes ask
+   you first.
+7. Ask for something bigger ("research my competitors and make a PDF") and
+   it starts a background job; the result shows up in the Jobs tab and is
+   read out when it's done.
+
+![every drawing HeyBuddy can make](docs/ink-marks.png)
+
+### Keys
+
+| Gesture | What it does |
+| --- | --- |
+| hold **Ctrl+Alt** | talk (release under 0.5 s = ignored) |
+| double-tap **Ctrl** | type a question in the quick-ask box |
+| hold **Ctrl+Win** | dictate: your words are typed where the caret is |
+| **Esc** | stop talking and clear drawings |
+
 Press Ctrl+Alt again at any time to interrupt and ask something else.
 Pressing any other key while holding the chord (Ctrl+Alt+Del, AltGr
-characters) cancels instead of sending.
+characters) cancels instead of sending. The black **notch** at the top of
+the screen shows when HeyBuddy is listening (cyan), thinking (pink) or
+talking (orange); hover it to open the panel.
 
 ## Requirements
 
@@ -53,11 +85,16 @@ npx wrangler secret put APP_SHARED_SECRET   # paste the same value into HeyBuddy
 
 Copy the deployed URL, e.g. `https://heybuddy-proxy.you.workers.dev`.
 
-## 2a. Run the prebuilt app
+## 2a. Install the prebuilt app
 
-Download `HeyBuddy-windows-x64.zip` from the repository's **Releases** (or the
-latest *Windows build* Actions run), unzip, run `HeyBuddy.exe`.
-Windows SmartScreen may warn because the exe is unsigned: *More info → Run anyway*.
+From the repository's **Releases**, download **`HeyBuddy-Setup-0.3.0.exe`**
+and run it. It installs for your user only (no admin), adds a Start menu
+entry, and can start HeyBuddy when you sign in. Uninstall from *Settings →
+Apps*; it asks whether to keep your settings, memory and jobs.
+
+Prefer portable? Download `HeyBuddy-windows-x64.zip`, unzip, run `HeyBuddy.exe`.
+Windows SmartScreen may warn because the build is unsigned: *More info → Run
+anyway*. Check downloads against `SHA256SUMS.txt`.
 
 ## 2b. Or run from source
 
@@ -90,8 +127,10 @@ Settings, logs and (optional) recordings live in `%APPDATA%\HeyBuddy`
 | Open | show/hide the panel (chat history, text box) |
 | Toggle Companion | mute the hotkey (e.g. during meetings) |
 | Show Buddy Cursor | buddy always visible, or only during a turn |
+| Jobs | open the Jobs tab (background helpers, their files) |
 | Clear Conversation | forget the last 10 exchanges |
-| Settings | model, hotkey, mic, voice, autostart, Worker access key |
+| Settings | General: model, hotkey, mic, voice, autostart, Worker access key. Abilities and privacy: drawings, guided steps, dictation, quick-ask, tools and their approval rules, jobs, memory |
+| Report a Bug | opens a GitHub issue |
 | Quit | exit |
 
 ## Build the .exe
@@ -127,10 +166,12 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-31 tests cover the POINT grammar, coordinate mapping, multi-turn
-transcripts, the motion model, config robustness, an end-to-end typed turn
-against the mock Worker, and (off-Windows) offscreen rendering of every
-buddy state.
+56 tests cover the buddy-program parser (including real HeyClicky-style
+programs and hostile input), legacy POINT tags, coordinate mapping, tool
+safety rules, the tool loop and background jobs against the mock Worker,
+gestures, multi-turn transcripts, the motion model, config robustness, and
+(off-Windows) offscreen rendering of every buddy state, every drawing and
+the notch. See [docs/TESTING.md](docs/TESTING.md).
 
 ## Troubleshooting
 
@@ -145,10 +186,17 @@ buddy state.
 | Buddy points at the wrong place | check `DPI awareness: per-monitor-v2` in `heybuddy.log`; send the log's `POINT flight:` lines with an issue |
 | Buddy appears in screenshots | Windows older than 2004 can't exclude windows from capture; harmless |
 | Two buddies | only one instance runs now; kill stray `pythonw.exe` from older versions |
+| It asks before every command | Settings → Abilities → *Run PowerShell commands* → Always allow (or Never) |
+| Drawings stay too long / vanish too fast | Settings → Abilities → *Keep drawings for* |
+| Ctrl+Win opens the Start menu | update to 0.3.0; or pick Ctrl+Shift+Space for dictation |
+| Quick-ask box doesn't take typing | click into it once; some full-screen apps block focus changes |
 
 ## Docs
 
+* [docs/HEYCLICKY_TEARDOWN.md](docs/HEYCLICKY_TEARDOWN.md) — how HeyClicky for Windows works, what HeyBuddy reproduces, what it doesn't
 * [docs/REVERSE_ENGINEERING.md](docs/REVERSE_ENGINEERING.md) — how Clicky works and how each part maps to Windows
+* [docs/TESTING.md](docs/TESTING.md) — test plan and latest results
+* [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) — dependency inventory and licenses
 * [CLAUDE.md](CLAUDE.md) — architecture, threading, file map, conventions (for contributors and coding agents)
 * [SECURITY.md](SECURITY.md) — data flow, storage, Worker hardening
 

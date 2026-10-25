@@ -7,13 +7,16 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QTabWidget,
     QVBoxLayout,
+    QWidget,
 )
 
 from ..models.config import AppConfig
@@ -357,10 +360,102 @@ class SettingsPanel(QDialog):
         for button in buttons.buttons():
             button.setCursor(Qt.CursorShape.PointingHandCursor)
 
+        abilities = self._build_abilities_form(config)
+
+        general_page = QWidget()
+        general_page.setLayout(form)
+        abilities_page = QWidget()
+        abilities_page.setLayout(abilities)
+        tabs = QTabWidget()
+        tabs.addTab(general_page, "General")
+        tabs.addTab(abilities_page, "Abilities and privacy")
+
         layout = QVBoxLayout(self)
-        layout.addLayout(form)
+        layout.addWidget(tabs)
         layout.addWidget(self.status_label)
         layout.addWidget(buttons)
+
+    # ----- HeyBuddy 0.3 abilities -----
+    _POLICY_CHOICES = (("ask", "Ask me every time"), ("allow", "Always allow"), ("deny", "Never"))
+    _DICTATION_CHOICES = (("ctrl+win", "Ctrl + Win"), ("ctrl+shift+space", "Ctrl + Shift + Space"), ("", "Off"))
+
+    def _build_abilities_form(self, config: AppConfig) -> QFormLayout:
+        abilities = QFormLayout()
+        self.annotations_enabled = QCheckBox("Draw on my screen while explaining (rings, arrows, highlights)")
+        self.annotations_enabled.setChecked(config.annotations_enabled)
+        abilities.addRow(self.annotations_enabled)
+        self.guided_steps_enabled = QCheckBox("Walk me through steps: wait for my click, then continue")
+        self.guided_steps_enabled.setChecked(config.guided_steps_enabled)
+        abilities.addRow(self.guided_steps_enabled)
+        self.annotation_linger = QDoubleSpinBox()
+        self.annotation_linger.setRange(1.0, 120.0)
+        self.annotation_linger.setSuffix(" s")
+        self.annotation_linger.setValue(float(config.annotation_linger_seconds))
+        abilities.addRow("Keep drawings for", self.annotation_linger)
+        self.notch_enabled = QCheckBox("Show the notch at the top of the screen (restart to apply)")
+        self.notch_enabled.setChecked(config.notch_enabled)
+        abilities.addRow(self.notch_enabled)
+        self.quick_ask_enabled = QCheckBox("Double-tap Ctrl to type a question")
+        self.quick_ask_enabled.setChecked(config.quick_ask_enabled)
+        abilities.addRow(self.quick_ask_enabled)
+        self.dictation_hotkey = QComboBox()
+        for value, label in self._DICTATION_CHOICES:
+            self.dictation_hotkey.addItem(label, value)
+        current = config.dictation_hotkey if config.dictation_enabled else ""
+        self.dictation_hotkey.setCurrentIndex(max(0, self.dictation_hotkey.findData(current)))
+        abilities.addRow("Hold to dictate", self.dictation_hotkey)
+        self.tools_enabled = QCheckBox("Let HeyBuddy act on my PC (open links, copy, type, files)")
+        self.tools_enabled.setChecked(config.tools_enabled)
+        abilities.addRow(self.tools_enabled)
+        self.command_policy = QComboBox()
+        self.write_policy = QComboBox()
+        for combo, current_value in ((self.command_policy, config.command_policy), (self.write_policy, config.write_policy)):
+            for value, label in self._POLICY_CHOICES:
+                combo.addItem(label, value)
+            combo.setCurrentIndex(max(0, combo.findData(current_value)))
+        abilities.addRow("Run PowerShell commands", self.command_policy)
+        abilities.addRow("Write files outside its folder", self.write_policy)
+        self.background_jobs_enabled = QCheckBox("Hand longer work to background jobs")
+        self.background_jobs_enabled.setChecked(config.background_jobs_enabled)
+        abilities.addRow(self.background_jobs_enabled)
+        self.speak_job_results = QCheckBox("Say it out loud when a job finishes")
+        self.speak_job_results.setChecked(config.speak_job_results)
+        abilities.addRow(self.speak_job_results)
+        self.memory_enabled = QCheckBox("Remember facts I share (stored only on this PC)")
+        self.memory_enabled.setChecked(config.memory_enabled)
+        memory_row = QHBoxLayout()
+        memory_row.addWidget(self.memory_enabled, 1)
+        open_memory = QPushButton("Open")
+        open_memory.clicked.connect(self._open_memory_file)
+        clear_memory = QPushButton("Forget all")
+        clear_memory.clicked.connect(self._clear_memory)
+        memory_row.addWidget(open_memory)
+        memory_row.addWidget(clear_memory)
+        abilities.addRow(memory_row)
+        privacy = QLabel(
+            "HeyBuddy sends no analytics or crash reports. Screenshots, your words and tool "
+            "results go only to your own Worker and the AI services behind it."
+        )
+        privacy.setWordWrap(True)
+        privacy.setStyleSheet("color:#8a93a3; font-size:11px;")
+        abilities.addRow(privacy)
+        return abilities
+
+    def _open_memory_file(self) -> None:
+        from ..utils.constants import MEMORY_FILE
+        if not MEMORY_FILE.exists():
+            MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            MEMORY_FILE.write_text("# What HeyBuddy remembers about you\n\n", encoding="utf-8")
+        import os
+        import sys
+        if sys.platform == "win32":
+            os.startfile(str(MEMORY_FILE))  # type: ignore[attr-defined]
+
+    def _clear_memory(self) -> None:
+        from ..core.memory_store import MemoryStore
+        if QMessageBox.question(self, "Forget everything?", "Delete everything HeyBuddy remembers about you?") == QMessageBox.StandardButton.Yes:
+            MemoryStore().clear()
+            self._set_status("Memory cleared.", True)
 
     # ----- diagnostics -----
     def _ping_worker(self) -> None:
@@ -462,6 +557,24 @@ class SettingsPanel(QDialog):
             disable_autostart()
         self.config.autostart_enabled = is_autostart_enabled()
 
+        self.config.annotations_enabled = self.annotations_enabled.isChecked()
+        self.config.guided_steps_enabled = self.guided_steps_enabled.isChecked()
+        self.config.annotation_linger_seconds = float(self.annotation_linger.value())
+        self.config.notch_enabled = self.notch_enabled.isChecked()
+        self.config.quick_ask_enabled = self.quick_ask_enabled.isChecked()
+        new_dictation = self.dictation_hotkey.currentData() or ""
+        dictation_changed = (new_dictation or None) != (self.config.dictation_hotkey if self.config.dictation_enabled else None)
+        self.config.dictation_enabled = bool(new_dictation)
+        if new_dictation:
+            self.config.dictation_hotkey = new_dictation
+        self.config.tools_enabled = self.tools_enabled.isChecked()
+        self.config.command_policy = self.command_policy.currentData() or "ask"
+        self.config.write_policy = self.write_policy.currentData() or "ask"
+        self.config.background_jobs_enabled = self.background_jobs_enabled.isChecked()
+        self.config.speak_job_results = self.speak_job_results.isChecked()
+        self.config.memory_enabled = self.memory_enabled.isChecked()
+        hotkey_changed = hotkey_changed or dictation_changed
+
         self.config.save()
 
         # Rebind the live hotkey monitor so the change takes effect
@@ -472,7 +585,7 @@ class SettingsPanel(QDialog):
             monitor = getattr(owning_panel, "hotkey_monitor", None)
             if monitor is not None:
                 try:
-                    monitor.rebind(new_hotkey)
+                    monitor.rebind(new_hotkey, self.config.dictation_hotkey if self.config.dictation_enabled else "")
                 except Exception:
                     pass
 
