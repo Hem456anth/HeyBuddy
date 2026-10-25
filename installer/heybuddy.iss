@@ -77,8 +77,13 @@ var
 
 function InitializeUninstall(): Boolean;
 begin
-  RemoveDataCheckbox := MsgBox('Also delete your HeyBuddy settings, memory and job files in ' +
-    ExpandConstant('{userappdata}\HeyBuddy') + '?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+  { Silent uninstalls (CI, scripted removal) never prompt and keep user data.
+    SuppressibleMsgBox also honours /SUPPRESSMSGBOXES, answering No. }
+  if UninstallSilent then
+    RemoveDataCheckbox := False
+  else
+    RemoveDataCheckbox := SuppressibleMsgBox('Also delete your HeyBuddy settings, memory and job files in ' +
+      ExpandConstant('{userappdata}\HeyBuddy') + '?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES;
   Result := True;
 end;
 
