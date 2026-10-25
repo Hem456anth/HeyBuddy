@@ -112,6 +112,9 @@ jobs:
           }
           $lines | Out-File SHA256SUMS.txt -Encoding ascii
           (Get-FileHash dist\HeyBuddy.exe -Algorithm SHA256).Hash | Out-File HeyBuddy.exe.sha256
+          # Release assets need unique names; both self-checks write selfcheck.json.
+          Copy-Item selfcheck-exe\selfcheck\selfcheck.json selfcheck-exe.json -ErrorAction SilentlyContinue
+          Copy-Item selfcheck-installed\selfcheck\selfcheck.json selfcheck-installed.json -ErrorAction SilentlyContinue
 
       - uses: actions/upload-artifact@v4
         with:
@@ -160,9 +163,9 @@ jobs:
             HeyBuddy-windows-x64.zip
             SHA256SUMS.txt
             HeyBuddy.exe.sha256
-            selfcheck-exe/selfcheck/selfcheck.json
+            selfcheck-exe.json
             selfcheck-exe/selfcheck/buddy_region_visible.png
             selfcheck-exe/selfcheck/buddy_region_capture_excluded.png
             selfcheck-exe/selfcheck/ink_region_visible.png
             selfcheck-exe/selfcheck/ink_region_capture_excluded.png
-            selfcheck-installed/selfcheck/selfcheck.json
+            selfcheck-installed.json
