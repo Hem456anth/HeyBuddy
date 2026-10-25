@@ -100,7 +100,7 @@ class BuddyAccessibilityService : AccessibilityService() {
         if (focused.isPassword) throw IllegalStateException("HeyBuddy never types into password fields")
         val existing = focused.text?.toString().orEmpty()
         // Hint text is reported as text on some fields; don't append to it.
-        val current = if (Build.VERSION.SDK_INT >= 26 && focused.isShowingHintText) "" else existing
+        val current = if (focused.isShowingHintText) "" else existing
         val start = focused.textSelectionStart.takeIf { it in 0..current.length } ?: current.length
         val end = focused.textSelectionEnd.takeIf { it in start..current.length } ?: start
         val updated = current.substring(0, start) + text + current.substring(end)

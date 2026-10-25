@@ -73,7 +73,7 @@ fun CompanionSheet(
 ) {
     val state by graph.turns.state.collectAsState()
     val pending by graph.approvals.pending.collectAsState()
-    var typing by remember { mutableStateOf(startInTypeMode) }
+    var typing by remember(startInTypeMode) { mutableStateOf(startInTypeMode) }
     var typed by remember { mutableStateOf("") }
 
     Box(if (fillScreen) Modifier.fillMaxSize() else Modifier.fillMaxWidth(), contentAlignment = Alignment.BottomCenter) {

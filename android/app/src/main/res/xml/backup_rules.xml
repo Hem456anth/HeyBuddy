@@ -3,5 +3,4 @@
 <full-backup-content>
     <exclude domain="sharedpref" path="heybuddy_secrets.xml" />
     <exclude domain="file" path="jobs" />
-    <exclude domain="cache" path="." />
 </full-backup-content>

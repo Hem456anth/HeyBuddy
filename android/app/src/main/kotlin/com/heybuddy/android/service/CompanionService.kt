@@ -59,8 +59,8 @@ class CompanionService : Service() {
     private fun promote(kind: Int) {
         val type = when {
             Build.VERSION.SDK_INT < 29 -> 0
-            kind == TYPE_MIC -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             kind == TYPE_PROJECTION -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            kind == TYPE_MIC -> if (Build.VERSION.SDK_INT >= 30) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
             Build.VERSION.SDK_INT >= 34 -> ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
             else -> 0
         }

@@ -116,10 +116,19 @@ class HeyBuddySession(context: Context) : VoiceInteractionSession(context), Life
         startTurnOnce(frame)
     }
 
+    @androidx.annotation.RequiresApi(29)
     override fun onHandleAssist(state: AssistState) {
         if (!state.isFocused) return
         val structure = state.assistStructure ?: return
         screenText = collectText(structure)
+    }
+
+    /** API 26-28 delivery of the same assist data (API 29+ uses the AssistState overload above). */
+    @Deprecated("Superseded by onHandleAssist(AssistState) on API 29+")
+    @Suppress("DEPRECATION")
+    override fun onHandleAssist(data: android.os.Bundle?, structure: android.app.assist.AssistStructure?, content: android.app.assist.AssistContent?) {
+        if (android.os.Build.VERSION.SDK_INT >= 29) return
+        if (structure != null) screenText = collectText(structure)
     }
 
     private fun startTurnOnce(frame: CapturedFrame?) {
