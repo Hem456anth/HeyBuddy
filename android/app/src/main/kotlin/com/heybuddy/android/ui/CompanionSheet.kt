@@ -1,7 +1,6 @@
 package com.heybuddy.android.ui
 
 import android.graphics.Rect
-import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -90,7 +89,6 @@ fun CompanionSheet(
                     onSheetBounds(Rect(b.left.toInt(), b.top.toInt(), b.right.toInt(), b.bottom.toInt()))
                 }
                 .padding(18.dp)
-                .animateContentSize()
                 .testTag("companion_sheet"),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {

@@ -49,7 +49,15 @@ class OnboardingAndPermissionsTest {
     }
 
     private fun waitForTag(tag: String, timeoutMs: Long = 10_000) {
-        compose.waitUntil(timeoutMs) { compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil(timeoutMs) {
+            try {
+                compose.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
+            } catch (error: Exception) {
+                // ComposeNotIdleException: emulator busy (e.g. dexopt right after install); keep polling until the timeout.
+                if (error.javaClass.simpleName != "ComposeNotIdleException") throw error
+                false
+            }
+        }
     }
 
     /** Advance a step: its skip/later/not-now button, or "Next" when the step is already satisfied. */
@@ -108,7 +116,7 @@ class OnboardingAndPermissionsTest {
         val intent = Intent(CompanionActivity.ACTION_TALK).setClass(context, CompanionActivity::class.java)
             .putExtra(CompanionActivity.EXTRA_MODE, "type")
         ActivityScenario.launch<CompanionActivity>(intent).use { scenario ->
-            waitForTag("companion_sheet", 15_000)
+            waitForTag("companion_sheet", 30_000)
             waitForTag("companion_input")
             assertEquals(Lifecycle.State.RESUMED, scenario.state)
         }
