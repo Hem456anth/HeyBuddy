@@ -16,6 +16,12 @@ Port of Clicky's `CompanionManager`:
 * Pressing another key while the chord is held (Ctrl+Alt+Del, an AltGr
   character) cancels the recording instead of sending it.
 
+Telugu mode (0.4, `config.language_mode == "telugu"`): STT is a Gnani
+realtime session (te-IN), the system prompt gets the Telugu addendum, and
+speech is Gnani TTS streamed as PCM; say() lines are spoken as soon as
+Claude has written them (`StreamingReplyChunker`). English mode is
+unchanged. Stage timings for every turn go to logs/latency.log (no content).
+
 Threading: network and capture work runs on short-lived worker threads.
 Everything the UI needs is emitted as a Qt signal (queued to the UI thread).
 """
@@ -29,8 +35,11 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
-from ..api.assemblyai_streaming import AssemblyAIStreamingSession
 from typing import TYPE_CHECKING, Callable
+
+from ..api.assemblyai_streaming import AssemblyAIStreamingSession
+from ..api.gnani_streaming import GnaniStreamingSession, transcribe_with_rest
+from ..api.gnani_tts import GnaniTTSClient
 
 from ..api.claude_client import ClaudeClient, ToolCall, run_tool_loop, stream_round
 from ..api.cloudflare_proxy import CloudflareProxy
@@ -38,14 +47,21 @@ from ..api.elevenlabs_client import ElevenLabsClient
 from ..models.config import AppConfig
 from ..models.message import CapturedScreen, Message, PointMarker, Role
 from ..utils import win32
-from ..utils.constants import CONVERSATION_HISTORY_MAX_EXCHANGES, RECORDINGS_DIR
-from ..utils.logger import get_logger
+from ..utils.constants import (
+    CONVERSATION_HISTORY_MAX_EXCHANGES,
+    LANGUAGE_MODES,
+    RECORDINGS_DIR,
+    TELUGU_SYSTEM_PROMPT_ADDENDUM,
+)
+from ..utils.logger import get_latency_logger, get_logger
 from .audio_player import AudioPlayer
 from .audio_recorder import AudioRecorder
 from .beat_speaker import BeatSpeaker
+from .latency import TurnLatency
 from .memory_store import MemoryStore
 from .scene_program import Beat, display_text_for_partial, parse_reply_program, resolve_marks
 from .screen_capture import ScreenCapture
+from .speech_chunker import StreamingReplyChunker
 from .tools import VOICE_TOOLS, ToolContext, ToolError, default_working_dir, execute_tool, tool_definitions
 
 if TYPE_CHECKING:
@@ -114,6 +130,7 @@ class CompanionManager(QObject):
     task_changed = pyqtSignal(str)                # task("...") from a guided walkthrough
     tool_activity = pyqtSignal(str)               # tool name being executed
     dictation_delivered = pyqtSignal(str)         # text typed at the caret
+    language_mode_changed = pyqtSignal(str)       # "english" | "telugu"
 
     def __init__(
         self,
@@ -127,8 +144,10 @@ class CompanionManager(QObject):
         memory: MemoryStore | None = None,
         jobs: "JobManager | None" = None,
         approve: Callable[[str, str], bool] | None = None,
+        gnani_tts: GnaniTTSClient | None = None,
     ) -> None:
         super().__init__()
+        self.gnani_tts = gnani_tts
         self.memory = memory
         self.jobs = jobs
         self.approve = approve or (lambda _title, _detail: False)
@@ -150,8 +169,9 @@ class CompanionManager(QObject):
         self._history: list[Message] = []
         self._enabled: bool = True
         self._turn_generation = 0
-        self._active_stt_session: AssemblyAIStreamingSession | None = None
+        self._active_stt_session: AssemblyAIStreamingSession | GnaniStreamingSession | None = None
         self._latest_partial_transcript: str = ""
+        self._latency: TurnLatency | None = None
 
     # ---- public API ----
     @property
@@ -172,6 +192,40 @@ class CompanionManager(QObject):
         log.info("Companion %s", "enabled" if self._enabled else "disabled")
         if not self._enabled:
             self.cancel()
+
+    @property
+    def language_mode(self) -> str:
+        return self.config.language_mode
+
+    def set_language_mode(self, mode: str) -> bool:
+        """Switch English/Telugu; persisted, applies from the next turn."""
+        if mode not in LANGUAGE_MODES:
+            raise ValueError(f"unknown language mode {mode!r}")
+        if mode == self.config.language_mode:
+            return False
+        self.config.language_mode = mode
+        try:
+            self.config.save()
+        except Exception:
+            log.exception("Failed to save language_mode")
+        log.info("Language mode -> %s", mode)
+        self.language_mode_changed.emit(mode)
+        return True
+
+    def toggle_language_mode(self) -> str:
+        """English <-> Telugu (tray menu)."""
+        new_mode = "english" if self.config.is_telugu_mode else "telugu"
+        self.set_language_mode(new_mode)
+        return new_mode
+
+    def _gnani_tts_client(self) -> GnaniTTSClient:
+        telugu = self.config.telugu
+        if self.gnani_tts is None:
+            self.gnani_tts = GnaniTTSClient(self.proxy)
+        self.gnani_tts.language = telugu.tts_language
+        self.gnani_tts.speed = telugu.tts_speed
+        self.gnani_tts.sample_rate = telugu.tts_sample_rate
+        return self.gnani_tts
 
     @pyqtSlot()
     def clear_history(self) -> None:
@@ -212,6 +266,8 @@ class CompanionManager(QObject):
                 self._set_state_locked(CompanionState.IDLE)
                 return
             generation = self._turn_generation
+            self._latency = TurnLatency(generation, self.config.language_mode)
+            self._latency.mark("release")
             self._set_state_locked(CompanionState.PROCESSING)
         threading.Thread(
             target=self._finish_capture_and_respond,
@@ -264,13 +320,7 @@ class CompanionManager(QObject):
     # ---- capture path ----
     def _open_stt_and_start_recording(self, generation: int) -> None:
         self._latest_partial_transcript = ""
-        session = AssemblyAIStreamingSession(
-            proxy=self.proxy,
-            sample_rate=self.config.audio.sample_rate,
-            speech_model=self.config.transcription.speech_model,
-            on_partial=lambda text: self._on_stt_partial(generation, text),
-            on_error=lambda message: self._fail(generation, f"Transcription: {message}"),
-        )
+        session = self._new_stt_session(generation)
         # Start the mic FIRST and buffer, so the first words aren't lost while
         # the token + websocket handshake (~300-800 ms) is in flight. Buffered
         # audio is flushed into the socket as soon as it opens.
@@ -315,6 +365,26 @@ class CompanionManager(QObject):
             pending_audio_chunks.clear()
             socket_ready.set()
 
+    def _new_stt_session(self, generation: int) -> AssemblyAIStreamingSession | GnaniStreamingSession:
+        on_partial = lambda text: self._on_stt_partial(generation, text)  # noqa: E731
+        on_error = lambda message: self._fail(generation, f"Transcription: {message}")  # noqa: E731
+        if self.config.is_telugu_mode:
+            return GnaniStreamingSession(
+                proxy=self.proxy,
+                lang_code=self.config.telugu.stt_lang_code,
+                sample_rate=self.config.audio.sample_rate,
+                min_silence_ms=self.config.telugu.min_silence_ms,
+                on_partial=on_partial,
+                on_error=on_error,
+            )
+        return AssemblyAIStreamingSession(
+            proxy=self.proxy,
+            sample_rate=self.config.audio.sample_rate,
+            speech_model=self.config.transcription.speech_model,
+            on_partial=on_partial,
+            on_error=on_error,
+        )
+
     def _finish_capture_and_respond(self, generation: int) -> None:
         # Keep the mic open a moment after release so the last syllable
         # isn't clipped (HeyClicky waits a 150 ms tail).
@@ -342,6 +412,9 @@ class CompanionManager(QObject):
         if not final_transcript:
             final_transcript = self._latest_partial_transcript
         final_transcript = (final_transcript or "").strip()
+        if (not final_transcript and isinstance(session, GnaniStreamingSession)
+                and generation == self._turn_generation and self._has_speech(pcm_bytes)):
+            final_transcript = self._gnani_rest_fallback(pcm_bytes)
 
         if pcm_bytes and self.config.save_recordings:
             try:
@@ -358,6 +431,9 @@ class CompanionManager(QObject):
             log.info("No speech detected; back to IDLE")
             self._set_state_if_current(generation, CompanionState.IDLE)
             return
+        latency = self._latency
+        if latency is not None and latency.turn == generation:
+            latency.mark("stt_final")
         self.transcription_final.emit(final_transcript)
         self._respond_to_user_text(generation, final_transcript, self.config.screen_capture_enabled)
 
@@ -376,6 +452,8 @@ class CompanionManager(QObject):
         except Exception:
             pass
         extras.append(f"local time: {time.strftime('%A %Y-%m-%d %H:%M')}")
+        if self.config.is_telugu_mode:
+            extras.append(TELUGU_SYSTEM_PROMPT_ADDENDUM)
         return prompt + "\n\n" + "\n\n".join(extras)
 
     def _tool_context(self) -> ToolContext:
@@ -405,6 +483,12 @@ class CompanionManager(QObject):
         def is_current_turn() -> bool:
             return generation == self._turn_generation
 
+        telugu_mode = self.config.is_telugu_mode
+        latency = self._latency
+        if latency is None or latency.turn != generation:
+            latency = TurnLatency(generation, self.config.language_mode)
+            self._latency = latency
+
         payload = self.claude.build_payload(self._history + [user_message], screens=captured_screens)
         payload["system"] = self._system_prompt()
         if self.config.tools_enabled:
@@ -424,11 +508,13 @@ class CompanionManager(QObject):
 
         def on_all_done() -> None:
             turn_finished.set()
+            latency.report(get_latency_logger())
             if is_current_turn():
                 self.speech_finished.emit()
                 self._set_state_if_current(generation, CompanionState.IDLE)
 
         def on_audio_started() -> None:
+            latency.mark("first_audio")
             self._set_state_if_current(generation, CompanionState.RESPONDING)
 
         def on_beat_started(beat: Beat) -> None:
@@ -448,14 +534,33 @@ class CompanionManager(QObject):
                 for marker in markers:
                     self.point_received.emit(marker)
 
-        speaker = BeatSpeaker(
-            synthesize=self.tts.synthesize if self.config.tts_enabled else None,
-            play_mp3=self.player.play_mp3 if self.config.tts_enabled else None,
-            on_beat_started=on_beat_started,
-            on_audio_started=on_audio_started,
-            on_all_done=on_all_done,
-            on_error=lambda message: self.error_occurred.emit(message) if is_current_turn() else None,
-        )
+        voice_on = self.config.tts_enabled
+        if telugu_mode:
+            gnani = self._gnani_tts_client()
+            speaker = BeatSpeaker(
+                synthesize=None,
+                play_mp3=None,
+                stream_synthesize=gnani.stream_pcm if voice_on else None,
+                play_pcm_stream=(
+                    (lambda chunks, **callbacks: self.player.play_pcm_stream(
+                        chunks, sample_rate=gnani.sample_rate, **callbacks))
+                    if voice_on else None
+                ),
+                on_first_chunk=lambda: latency.mark("first_chunk"),
+                on_beat_started=on_beat_started,
+                on_audio_started=on_audio_started,
+                on_all_done=on_all_done,
+                on_error=lambda message: self.error_occurred.emit(message) if is_current_turn() else None,
+            )
+        else:
+            speaker = BeatSpeaker(
+                synthesize=self.tts.synthesize if voice_on else None,
+                play_mp3=self.player.play_mp3 if voice_on else None,
+                on_beat_started=on_beat_started,
+                on_audio_started=on_audio_started,
+                on_all_done=on_all_done,
+                on_error=lambda message: self.error_occurred.emit(message) if is_current_turn() else None,
+            )
         speaker_holder.append(speaker)
         with self._state_lock:
             if not is_current_turn():
@@ -463,7 +568,17 @@ class CompanionManager(QObject):
                 return
             self._active_speaker = speaker
 
+        chunker = StreamingReplyChunker() if (telugu_mode and self.config.telugu.stream_speech) else None
+
         def speak_round(round_text: str, more_coming: bool) -> None:
+            if chunker is not None:
+                # Most of the round was already spoken piece by piece.
+                for piece in chunker.flush():
+                    speak_text(piece)
+                return
+            speak_text(round_text)
+
+        def speak_text(round_text: str) -> None:
             if not is_current_turn():
                 return
             program = resolve_marks(parse_reply_program(round_text), captured_screens)
@@ -481,9 +596,13 @@ class CompanionManager(QObject):
                     speaker.add(beat)
 
         def on_text(piece: str) -> None:
+            latency.mark("first_token")
             streamed_text.append(piece)
             if is_current_turn():
                 self.assistant_partial.emit(display_text_for_partial("".join(streamed_text)))
+                if chunker is not None:
+                    for ready_piece in chunker.feed(piece):
+                        speak_text(ready_piece)
 
         context = self._tool_context()
 
@@ -495,6 +614,7 @@ class CompanionManager(QObject):
             except ToolError as refusal:
                 return str(refusal), True
 
+        latency.mark("request")
         try:
             if self.config.tools_enabled:
                 run_tool_loop(
@@ -539,7 +659,10 @@ class CompanionManager(QObject):
 
         def run() -> None:
             try:
-                mp3_bytes = self.tts.synthesize(text)
+                if self.config.is_telugu_mode:
+                    mp3_bytes = self._gnani_tts_client().synthesize(text)
+                else:
+                    mp3_bytes = self.tts.synthesize(text)
             except Exception:
                 log.exception("Announcement TTS failed")
                 return
@@ -606,6 +729,28 @@ class CompanionManager(QObject):
         self._active_stt_session = None
         if session is not None:
             threading.Thread(target=session.cancel, name="SttCancel", daemon=True).start()
+
+    def _has_speech(self, pcm_bytes: bytes) -> bool:
+        """At least 0.4 s of audio with something louder than room noise."""
+        if not pcm_bytes or len(pcm_bytes) < int(0.4 * self.config.audio.sample_rate) * 2:
+            return False
+        try:
+            import numpy as np
+            samples = np.frombuffer(pcm_bytes[: len(pcm_bytes) // 2 * 2], dtype=np.int16)
+            return int(np.abs(samples).max()) > 500
+        except Exception:
+            return True
+
+    def _gnani_rest_fallback(self, pcm_bytes: bytes) -> str:
+        try:
+            transcript = transcribe_with_rest(
+                self.proxy, pcm_bytes, self.config.audio.sample_rate, self.config.telugu.stt_lang_code,
+            )
+        except Exception:
+            log.exception("Gnani REST STT fallback failed")
+            return ""
+        log.info("Realtime STT was empty; REST fallback returned %d chars", len(transcript))
+        return transcript
 
     def _persist_recording(self, pcm_bytes: bytes) -> Path:
         RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)

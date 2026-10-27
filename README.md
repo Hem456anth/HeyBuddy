@@ -12,6 +12,11 @@ and in 0.3 gained the core experience of **HeyClicky for Windows**, rebuilt
 clean-room from a reverse-engineering study
 ([docs/HEYCLICKY_TEARDOWN.md](docs/HEYCLICKY_TEARDOWN.md)).
 
+**New in 0.4: Telugu mode.** Speak Telugu or Tenglish and hear Telugu back,
+with speech by Gnani's Vachana models (Prisma STT, Timbre TTS), streamed so
+the answer starts sooner. Switch it from the tray: *Language → Telugu*. See
+[docs/TELUGU_MODE.md](docs/TELUGU_MODE.md).
+
 ![states: following, listening, thinking, pointing](docs/buddy-states.png)
 
 > Credits: a Windows reimplementation of @farzaa's macOS Clicky (MIT). The
@@ -77,6 +82,13 @@ npx wrangler secret put ELEVENLABS_API_KEY
 npx wrangler deploy
 ```
 
+For Telugu mode, also add your Gnani key (voice and model are vars in
+`wrangler.toml`; see [docs/TELUGU_MODE.md](docs/TELUGU_MODE.md)):
+
+```bash
+npx wrangler secret put GNANI_API_KEY
+```
+
 Optional but recommended (see [SECURITY.md](SECURITY.md)):
 
 ```bash
@@ -87,7 +99,7 @@ Copy the deployed URL, e.g. `https://heybuddy-proxy.you.workers.dev`.
 
 ## 2a. Install the prebuilt app
 
-From the repository's **Releases**, download **`HeyBuddy-Setup-0.3.0.exe`**
+From the repository's **Releases**, download **`HeyBuddy-Setup-0.4.0.exe`**
 and run it. It installs for your user only (no admin), adds a Start menu
 entry, and can start HeyBuddy when you sign in. Uninstall from *Settings →
 Apps*; it asks whether to keep your settings, memory and jobs.
@@ -127,6 +139,7 @@ Settings, logs and (optional) recordings live in `%APPDATA%\HeyBuddy`
 | Open | show/hide the panel (chat history, text box) |
 | Toggle Companion | mute the hotkey (e.g. during meetings) |
 | Show Buddy Cursor | buddy always visible, or only during a turn |
+| Language | English (AssemblyAI + ElevenLabs) or Telugu / తెలుగు (Gnani STT + TTS, Telugu replies); saved, applies from the next turn |
 | Jobs | open the Jobs tab (background helpers, their files) |
 | Clear Conversation | forget the last 10 exchanges |
 | Settings | General: model, hotkey, mic, voice, autostart, Worker access key. Abilities and privacy: drawings, guided steps, dictation, quick-ask, tools and their approval rules, jobs, memory |
@@ -166,7 +179,10 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-56 tests cover the buddy-program parser (including real HeyClicky-style
+126 tests cover Telugu mode (Gnani realtime STT framing and pacing, SSE/REST
+TTS and its fallback, the REST STT fallback, the Telugu number/markup
+normaliser, streamed `say()` chunking, the tray toggle, and full Telugu turns
+against a local mock WebSocket/SSE Worker), the buddy-program parser (including real HeyClicky-style
 programs and hostile input), legacy POINT tags, coordinate mapping, tool
 safety rules, the tool loop and background jobs against the mock Worker,
 gestures, multi-turn transcripts, the motion model, config robustness, and
@@ -190,11 +206,14 @@ the notch. See [docs/TESTING.md](docs/TESTING.md).
 | Drawings stay too long / vanish too fast | Settings → Abilities → *Keep drawings for* |
 | Ctrl+Win opens the Start menu | update to 0.3.0; or pick Ctrl+Shift+Space for dictation |
 | Quick-ask box doesn't take typing | click into it once; some full-screen apps block focus changes |
+| Telugu mode: "Telugu mode is not configured" | `npx wrangler secret put GNANI_API_KEY` and redeploy |
+| Telugu mode: English words show in Telugu script | expected: Gnani STT `te-IN` transliterates code-mixed English |
 
 ## Docs
 
 * [docs/HEYCLICKY_TEARDOWN.md](docs/HEYCLICKY_TEARDOWN.md) — how HeyClicky for Windows works, what HeyBuddy reproduces, what it doesn't
 * [docs/REVERSE_ENGINEERING.md](docs/REVERSE_ENGINEERING.md) — how Clicky works and how each part maps to Windows
+* [docs/TELUGU_MODE.md](docs/TELUGU_MODE.md) — Telugu mode with Gnani: setup, verified endpoints, live latency numbers, limits, challenge checklist
 * [docs/TESTING.md](docs/TESTING.md) — test plan and latest results
 * [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) — dependency inventory and licenses
 * [CLAUDE.md](CLAUDE.md) — architecture, threading, file map, conventions (for contributors and coding agents)

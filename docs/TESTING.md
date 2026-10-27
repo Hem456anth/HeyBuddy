@@ -4,7 +4,8 @@
 
 | Layer | Where | What it proves |
 | --- | --- | --- |
-| Unit + integration (pytest, 56 tests) | Linux sandbox and the Windows CI runner | parser, mapping, tools safety, tool loop, jobs, gestures, motion, config, offscreen rendering |
+| Unit + integration (pytest, 126 tests) | Linux sandbox and the Windows CI runner | parser, mapping, tools safety, tool loop, jobs, gestures, motion, config, offscreen rendering; Telugu mode against `tests/mock_gnani.py` (local WebSocket + SSE Worker stand-in) |
+| Live Gnani smoke (`scripts/gnani_smoke.py`) | manual only, needs `GNANI_API_KEY`; never in CI | Gnani TTS REST/SSE and STT REST/realtime from the real API; results in docs/TELUGU_MODE.md |
 | `--selfcheck` from source | Windows CI runner, real desktop | real Win32 hooks/styles, real capture, full turn pipeline against a mock Worker |
 | `--selfcheck` of `HeyBuddy.exe` | Windows CI runner | the PyInstaller build works the same as the source |
 | Installer round trip | Windows CI runner | silent per-user install, Start menu shortcut, self-check of the *installed* exe, silent uninstall |

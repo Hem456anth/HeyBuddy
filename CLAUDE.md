@@ -27,6 +27,15 @@ it plays; `point()` makes the blue triangle buddy fly there. A `target()`
 box waits for the user's click and then starts the next step automatically.
 The client holds **no API keys**.
 
+**Telugu mode** (0.4, `language_mode: "telugu"`, tray → Language): STT is
+Gnani realtime (`te-IN`) via the Worker's `/gnani/stt-stream` WebSocket
+(REST `/gnani/stt` retry if it comes back empty), the system prompt gets
+`TELUGU_SYSTEM_PROMPT_ADDENDUM`, Claude's stream is cut into `say()` lines as
+it arrives (`core/speech_chunker.py`), each line is normalised
+(`core/telugu_normalizer.py`) and spoken with Gnani SSE TTS as raw PCM that
+plays from the first chunk. English mode keeps the old path unchanged. See
+`docs/TELUGU_MODE.md`.
+
 Other surfaces: the **notch** (black pill, top centre; listening/thinking/
 speaking strip; hover opens the panel), the **quick-ask** box (double-tap
 Ctrl), **dictation** (hold Ctrl+Win, text typed at the caret), the panel's
@@ -56,11 +65,12 @@ are dropped. History holds completed exchanges only.
 | sounddevice input callback | `core.audio_recorder` | PCM blocks (100 ms) → STT socket (buffered until open) + level meter |
 | `StartCapture` | `CompanionManager` | starts mic, fetches token, opens STT websocket |
 | `AssemblyAIReader` | `api.assemblyai_streaming` | `WebSocketApp.run_forever`, Turn messages |
+| `GnaniSttReader` / `GnaniSttSender` / `GnaniSttClose` | `api.gnani_streaming` | Telugu mode: WS reader; 1,024-byte frames paced at 32 ms (2x when backlogged); background close after `stop()` |
 | `TurnPipeline` / `TypedTurn` | `CompanionManager` | finalize STT, capture screens, Claude SSE rounds + tool execution |
-| `BeatSpeaker` + `TTS` pool | `core.beat_speaker` | per-line TTS with prefetch, sequential playback, beat-start callbacks |
+| `BeatSpeaker` + `TTS` pool | `core.beat_speaker` | per-line TTS with prefetch, sequential playback, beat-start callbacks; in Telugu mode the pool fills `PcmStream` buffers from Gnani SSE |
 | `Job-<id>` | `core.jobs.JobManager` | background job tool loop (one thread per job) |
 | `ClipboardRestore` | `utils.win32` | puts the user's clipboard back after a paste |
-| `AudioPlayer` | `core.audio_player` | ffmpeg MP3 decode + private `sd.OutputStream` |
+| `AudioPlayer` / `AudioPlayerStream` | `core.audio_player` | ffmpeg MP3 decode + private `sd.OutputStream`; `play_pcm_stream` plays PCM chunks as they arrive |
 | `PystrayThread` | pystray | tray loop; menu callbacks marshal to Qt via `QMetaObject.invokeMethod` |
 
 Rules: never touch a QWidget off the main thread (emit a signal); never sleep
@@ -89,8 +99,20 @@ on the Qt thread; all `ctypes` lives in `src/utils/win32.py`.
 | `POST /tts` | `{"text": "..."}` (≤5,000 chars; no `voice_id`, Worker injects `ELEVENLABS_VOICE_ID`) | `audio/mpeg` |
 | `POST /transcribe-token` | empty | `{"token": "..."}` (AssemblyAI, 480 s) |
 
+Telugu mode (0.4), Gnani Vachana, secret `GNANI_API_KEY` (routes answer 503
+without it), vars `GNANI_TTS_VOICE` (default `Varuni`), `GNANI_TTS_MODEL`
+(default `timbre-v2.5`):
+
+| Route | Body | Response |
+| --- | --- | --- |
+| `GET /gnani/stt-stream` (WebSocket) | headers `x-heybuddy-lang` (→ `lang_code`, default `te-IN`), `x-sample-rate`, VAD headers; binary PCM16 frames of 1,024 bytes | Gnani JSON events relayed (`connected`, `processing`, `transcript`, `error`) |
+| `POST /gnani/stt` | WAV bytes ≤ 60 s, header `x-heybuddy-lang` | Gnani REST JSON (`transcript`) |
+| `POST /gnani/tts` | `{text, language?, speed?, audio_config?}` (no voice/model) | audio bytes (container from `audio_config`) |
+| `POST /gnani/tts-stream` | same | Gnani SSE (`start`, `chunk` base64 audio, `complete`, `error`) |
+
 Optional hardening, all off unless set: `APP_SHARED_SECRET` (client header
-`X-HeyBuddy-Key`), `ALLOWED_MODELS`, `MAX_TOKENS_CAP`. Non-POST → 405.
+`X-HeyBuddy-Key`, also on the WebSocket upgrade), `ALLOWED_MODELS`,
+`MAX_TOKENS_CAP`. Non-POST → 405, except `GET /gnani/stt-stream`.
 
 ## Buddy program (`src/core/scene_program.py`)
 
@@ -143,6 +165,8 @@ HeyBuddy/
 ├── docs/REVERSE_ENGINEERING.md       ← Clicky teardown + mapping to Windows
 ├── docs/HEYCLICKY_TEARDOWN.md        ← HeyClicky for Windows teardown + parity table
 ├── docs/TESTING.md                   ← test plan and latest results
+├── docs/TELUGU_MODE.md               ← Telugu mode (Gnani): setup, endpoints, live numbers, limits
+├── scripts/gnani_smoke.py            ← live Gnani smoke test (needs GNANI_API_KEY; never in CI)
 ├── installer/heybuddy.iss            ← Inno Setup per-user installer
 ├── requirements-desktop.txt / requirements-dev.txt
 ├── heybuddy.spec, version_info.txt, build.bat   ← PyInstaller one-file build + self-check
@@ -158,11 +182,16 @@ HeyBuddy/
     │   ├── claude_client.py          ← payload (multi-image, history cap), SSE rounds, tool loop
     │   ├── assemblyai_streaming.py   ← v3 WS session + TurnTranscriptAssembler
     │   ├── elevenlabs_client.py      ← /tts wrapper
+    │   ├── gnani_streaming.py        ← Telugu mode: Gnani realtime STT session + REST fallback
+    │   ├── gnani_tts.py              ← Telugu mode: Gnani SSE/REST TTS client (normalises text)
     │   └── transcription_provider.py ← batch interface (unused fallback surface)
     ├── core/
     │   ├── companion_manager.py      ← state machine, turns, tools, dictation, target follow-ups
     │   ├── scene_program.py          ← buddy program parser + mark resolution
-    │   ├── beat_speaker.py           ← per-line speech queue, beat timing
+    │   ├── beat_speaker.py           ← per-line speech queue, beat timing (MP3 or streamed PCM)
+    │   ├── speech_chunker.py        ← cuts Claude's stream into say() lines / sentences (Telugu mode)
+    │   ├── telugu_normalizer.py     ← digits/times/₹/% → spoken Telugu; strips markup before TTS
+    │   ├── latency.py               ← per-turn stage timings (logs/latency.log, no content)
     │   ├── tools.py                  ← local tools + safety rules
     │   ├── jobs.py                   ← background jobs (JobManager)
     │   ├── memory_store.py           ← local memory.md
@@ -218,6 +247,11 @@ HeyBuddy/
 | `dictation_enabled` / `dictation_hotkey` | `true` / `ctrl+win` | hold to dictate |
 | `quick_ask_enabled` | `true` | double-tap Ctrl box |
 | `notch_enabled` | `true` | notch window (restart to apply) |
+| `language_mode` | `english` | `english` or `telugu` (tray → Language) |
+| `telugu.stt_lang_code` / `telugu.tts_language` | `te-IN` | Gnani STT session language / TTS `language` (`te-IN` or `auto`) |
+| `telugu.min_silence_ms` | `400` | Gnani VAD silence closing a segment |
+| `telugu.stream_speech` | `true` | speak each say() line as soon as it is written |
+| `telugu.tts_speed` / `telugu.tts_sample_rate` | `1.0` / `24000` | Gnani TTS speed and PCM rate |
 
 `HEYBUDDY_HOME` overrides the data directory (tests, portable use).
 
@@ -242,7 +276,9 @@ build.bat                                # tests + PyInstaller + self-check of t
   Clicky's exact `#3380FF`, defined at the top of `overlay_window.py`).
 * Pure logic (parsing, mapping, motion) stays Qt- and Win32-free so it is
   unit-testable on any OS.
-* Never ship API keys; everything goes through the Worker.
+* Never ship API keys; everything goes through the Worker (Gnani too).
+* Gnani usage follows docs.gnani.ai only (see `docs/TELUGU_MODE.md`); the
+  Worker forwards only documented fields and headers.
 * No HeyClicky code, prompts, scripts or assets: behaviour is reproduced from
   the teardown with original code.
 * Every new capability that acts on the PC goes through `core/tools.py`

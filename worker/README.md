@@ -32,10 +32,16 @@ The two configs must stay in sync. If you change `name`, `vars`,
 | `POST /chat` | Forwards to `api.anthropic.com/v1/messages` | Streams SSE through |
 | `POST /tts` | Forwards to ElevenLabs TTS for the configured voice | Returns `audio/mpeg` |
 | `POST /transcribe-token` | Fetches a short-lived AssemblyAI v3 streaming token | Returns JSON |
+| `GET /gnani/stt-stream` | WebSocket proxy to Gnani realtime STT (`wss://api.vachana.ai/stt/v3/stream`) | Telugu mode; adds `x-api-key-id`, maps `x-heybuddy-lang` → `lang_code` |
+| `POST /gnani/stt` | Gnani REST STT (`/stt/v3`), WAV body ≤ 60 s | Telugu mode fallback |
+| `POST /gnani/tts` | Gnani REST TTS (`/api/v1/tts/inference`) | voice/model from `GNANI_TTS_VOICE` / `GNANI_TTS_MODEL` |
+| `POST /gnani/tts-stream` | Gnani SSE TTS (`/api/v1/tts/sse`) | SSE passthrough |
 
-The Worker's top-level handler rejects every non-POST request, so **all three
-routes must be POST** from the client — even `/transcribe-token`, which is
-semantically a fetch.
+The Worker's top-level handler rejects every non-POST request, so these
+routes must be POST from the client, even `/transcribe-token`, which is
+semantically a fetch. The one exception is the WebSocket upgrade
+`GET /gnani/stt-stream`. Telugu mode is HeyBuddy's own addition (0.4); the
+upstream routes are unchanged. See `docs/TELUGU_MODE.md`.
 
 ## Deploy
 
@@ -48,6 +54,7 @@ npm install
 npx wrangler secret put ANTHROPIC_API_KEY
 npx wrangler secret put ASSEMBLYAI_API_KEY
 npx wrangler secret put ELEVENLABS_API_KEY
+npx wrangler secret put GNANI_API_KEY        # Telugu mode (optional)
 ```
 
 `ELEVENLABS_VOICE_ID` is a Worker **variable** (not secret) so it lives in

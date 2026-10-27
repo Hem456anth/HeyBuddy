@@ -15,6 +15,10 @@ from ..utils.constants import (
     DEFAULT_SAMPLE_RATE,
     DEFAULT_SETTINGS_TEMPLATE,
     DEFAULT_STT_SPEECH_MODEL,
+    GNANI_TTS_SAMPLE_RATE,
+    LANGUAGE_MODE_ENGLISH,
+    LANGUAGE_MODE_TELUGU,
+    LANGUAGE_MODES,
     SETTINGS_FILE,
 )
 
@@ -64,6 +68,28 @@ class TranscriptionConfig:
     language: str = "en"
     # AssemblyAI realtime model id (see constants.DEFAULT_STT_SPEECH_MODEL).
     speech_model: str = DEFAULT_STT_SPEECH_MODEL
+
+
+@dataclass
+class TeluguConfig:
+    """Telugu mode (HeyBuddy 0.4): Gnani Vachana STT/TTS via the Worker.
+
+    The voice and TTS model are Worker settings (`GNANI_TTS_VOICE`,
+    `GNANI_TTS_MODEL`), like the ElevenLabs voice, so they are not here.
+    """
+    # Gnani realtime STT is single-language per session; te-IN is the
+    # default because it is the language Telugu speakers code-switch from.
+    stt_lang_code: str = "te-IN"
+    # Gnani TTS `language`: "te-IN" or "auto" (auto-detect from script).
+    tts_language: str = "te-IN"
+    # Silence that closes a Gnani VAD segment. Lower = faster transcript
+    # after release (segments are joined, so splitting a sentence is harmless).
+    min_silence_ms: int = 400
+    # Speak each say() line as soon as Claude finishes writing it.
+    stream_speech: bool = True
+    # Gnani TTS speed multiplier, 0.85-1.15.
+    tts_speed: float = 1.0
+    tts_sample_rate: int = GNANI_TTS_SAMPLE_RATE
 
 
 @dataclass
@@ -129,9 +155,18 @@ class AppConfig:
     quick_ask_enabled: bool = True
     # Black pill at the top of the screen showing listening/thinking/speaking.
     notch_enabled: bool = True
+    # ----- HeyBuddy 0.4 -----
+    # "english" (AssemblyAI + ElevenLabs, unchanged) or "telugu" (Gnani).
+    # Toggled from the tray menu; takes effect on the next turn.
+    language_mode: str = LANGUAGE_MODE_ENGLISH
+    telugu: TeluguConfig = field(default_factory=TeluguConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     ui: UIConfig = field(default_factory=UIConfig)
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
+
+    @property
+    def is_telugu_mode(self) -> bool:
+        return self.language_mode == LANGUAGE_MODE_TELUGU
 
     # ----- I/O helpers -----
     @classmethod
@@ -191,4 +226,7 @@ class AppConfig:
         top_level["transcription"] = TranscriptionConfig(
             **_known_kwargs(TranscriptionConfig, raw.get("transcription")),
         )
+        top_level["telugu"] = TeluguConfig(**_known_kwargs(TeluguConfig, raw.get("telugu")))
+        if top_level.get("language_mode") not in LANGUAGE_MODES:
+            top_level.pop("language_mode", None)
         return cls(**top_level)

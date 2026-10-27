@@ -1,5 +1,25 @@
 # HeyBuddy changelog
 
+## 0.4.0 — Telugu mode (Gnani Vachana)
+
+- **Telugu / Tenglish voice turns.** Tray → *Language → Telugu*: STT is
+  Gnani's realtime Prisma v2.5 (`te-IN`), Claude answers in Telugu script
+  while keeping English technical terms, and speech is Gnani Timbre v2.5
+  (Worker var `GNANI_TTS_VOICE`, default Varuni). English mode is unchanged.
+- **Worker:** new `/gnani/stt-stream` (WebSocket proxy), `/gnani/stt`
+  (REST), `/gnani/tts` and `/gnani/tts-stream` (SSE) routes; key in the
+  `GNANI_API_KEY` secret; `APP_SHARED_SECRET` still applies.
+- **Lower latency:** say() lines are spoken as soon as Claude has written
+  them; TTS streams PCM over SSE and plays from the first chunk (0.41 s to
+  the first audio chunk measured live, vs 0.96 s for REST on the same text).
+- **Telugu text normaliser** before TTS: digits, times, dates, ₹, % become
+  spoken Telugu; markdown, code and tags are stripped; names stay as written.
+- **Resilience:** an empty realtime transcript with audible input is retried
+  once with Gnani REST STT; SSE TTS falls back to REST before the first chunk.
+- **Stage timings** per turn in `logs/latency.log`, without any content.
+- `scripts/gnani_smoke.py`: live smoke test (not run in CI).
+- Docs: [docs/TELUGU_MODE.md](docs/TELUGU_MODE.md).
+
 ## 0.3.0 — HeyClicky-class companion (clean-room)
 
 From a reverse-engineering study of HeyClicky for Windows 1.1.3

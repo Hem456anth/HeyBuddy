@@ -40,6 +40,7 @@ if __package__ in (None, ""):
 from src.api.claude_client import ClaudeClient
 from src.api.cloudflare_proxy import CloudflareProxy
 from src.api.elevenlabs_client import ElevenLabsClient
+from src.api.gnani_tts import GnaniTTSClient
 from src.core import chimes
 from src.core.audio_player import AudioPlayer
 from src.core.audio_recorder import AudioRecorder
@@ -152,6 +153,14 @@ def _build_tray_icon(
         except Exception:
             log.exception("Failed to save show_cursor_buddy")
 
+    def on_choose_english(_icon, _item):
+        # Plain config flip + save; the next turn reads it. Safe off the Qt
+        # thread (the manager only emits a queued signal).
+        manager.set_language_mode("english")
+
+    def on_choose_telugu(_icon, _item):
+        manager.set_language_mode("telugu")
+
     def on_open_jobs(_icon, _item):
         _invoke_on_qt_thread(panel, "show_jobs_tab")
 
@@ -189,6 +198,21 @@ def _build_tray_icon(
             "Show Buddy Cursor",
             on_toggle_cursor_buddy,
             checked=lambda _item: config.show_cursor_buddy,
+        ),
+        # Telugu mode (0.4): Gnani STT/TTS + Telugu replies. Persisted in
+        # settings.json as `language_mode`; applies from the next turn.
+        pystray.MenuItem(
+            "Language",
+            pystray.Menu(
+                pystray.MenuItem(
+                    "English", on_choose_english, radio=True,
+                    checked=lambda _item: not config.is_telugu_mode,
+                ),
+                pystray.MenuItem(
+                    "Telugu / తెలుగు (Gnani)", on_choose_telugu, radio=True,
+                    checked=lambda _item: config.is_telugu_mode,
+                ),
+            ),
         ),
         pystray.MenuItem("Jobs", on_open_jobs),
         pystray.MenuItem("Clear Conversation", on_clear_conversation),
@@ -257,6 +281,12 @@ def main() -> int:
     proxy = CloudflareProxy(config.worker_url, shared_secret=config.worker_shared_secret)
     claude = ClaudeClient(proxy=proxy, model=config.model)
     tts = ElevenLabsClient(proxy=proxy)
+    gnani_tts = GnaniTTSClient(
+        proxy=proxy,
+        language=config.telugu.tts_language,
+        sample_rate=config.telugu.tts_sample_rate,
+        speed=config.telugu.tts_speed,
+    )
     player = AudioPlayer()
 
     approvals = ApprovalBroker()
@@ -277,6 +307,7 @@ def main() -> int:
         memory=memory,
         jobs=jobs,
         approve=approvals.approve,
+        gnani_tts=gnani_tts,
     )
 
     panel = MainPanel(config, manager)
@@ -402,7 +433,7 @@ def main() -> int:
     panel.show()
     panel.raise_()
 
-    log.info("HeyBuddy started. Hold %s anywhere to talk.", config.hotkey.upper())
+    log.info("HeyBuddy started (%s mode). Hold %s anywhere to talk.", config.language_mode, config.hotkey.upper())
     try:
         return qt_app.exec()
     finally:

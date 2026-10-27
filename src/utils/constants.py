@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "HeyBuddy"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 
 # Read-only resources (assets, the default settings template). In a
 # PyInstaller one-file build these live in the temporary `_MEIPASS` folder
@@ -76,6 +76,20 @@ CONVERSATION_HISTORY_MAX_EXCHANGES = 10
 WORKER_CHAT_PATH = "/chat"
 WORKER_TTS_PATH = "/tts"
 WORKER_TRANSCRIBE_TOKEN_PATH = "/transcribe-token"
+# Telugu mode (HeyBuddy 0.4): Gnani Vachana speech through the same Worker.
+WORKER_GNANI_STT_PATH = "/gnani/stt-stream"        # WebSocket (GET + Upgrade)
+WORKER_GNANI_STT_REST_PATH = "/gnani/stt"          # REST, WAV body (<= 60 s); fallback
+WORKER_GNANI_TTS_PATH = "/gnani/tts"               # REST, whole clip
+WORKER_GNANI_TTS_STREAM_PATH = "/gnani/tts-stream"  # SSE, base64 audio chunks
+
+LANGUAGE_MODE_ENGLISH = "english"
+LANGUAGE_MODE_TELUGU = "telugu"
+LANGUAGE_MODES = (LANGUAGE_MODE_ENGLISH, LANGUAGE_MODE_TELUGU)
+# Gnani realtime STT wants exactly 1,024-byte frames (512 PCM16 samples)
+# sent at real-time cadence: one frame every 32 ms at 16 kHz.
+GNANI_STT_FRAME_BYTES = 1024
+# Raw PCM16 mono at 24 kHz from Gnani TTS plays without any decoding.
+GNANI_TTS_SAMPLE_RATE = 24_000
 
 # Audio defaults (match Clicky)
 DEFAULT_SAMPLE_RATE = 16_000
@@ -139,3 +153,12 @@ guided steps: when they want to be walked through something, give one step at a 
 tools: you can call tools to act on their pc (open a link, copy or type text, list or read files, run a powershell command, fetch a web page, remember a fact). use them when they ask you to do something, not just explain it. before a tool runs, put a short say() line in your reply like "let me check" so they hear you. commands and file writes may ask the user to approve. for anything that takes more than a few seconds (research, making a document, multi-step work), call start_background_job with a complete brief and tell them you're on it; it reports back when done.
 never invent facts, files, prices or results. if a tool fails, say so plainly.
 """
+
+# Appended to the system prompt in Telugu mode only. HeyBuddy's own words;
+# the program syntax stays ASCII so scene_program parses it unchanged.
+TELUGU_SYSTEM_PROMPT_ADDENDUM = """language: telugu mode is on. the user speaks telugu, often mixed with english (tenglish), and your lines are spoken by a telugu voice.
+- write the text inside every say("...") in telugu script (తెలుగు), in a natural, friendly spoken style.
+- keep english technical terms, app names, menu and button labels, file names, commands, code and people's or product names exactly as they are written, in english (latin script). don't translate or transliterate them. for example: say("File menu లో Save As click చేయండి").
+- the buddy program itself stays exactly as described above and in ascii: the call names (say, point, ring, target ...), numbers, coordinates, screen=N, mark labels, and any [POINT:...] tag. only the spoken text is telugu.
+- write numbers, times, money and percentages as digits (10:30, ₹500, 45%); they are turned into spoken telugu for you.
+- no markdown, emojis or symbols."""

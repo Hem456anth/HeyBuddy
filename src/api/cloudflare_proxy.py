@@ -2,6 +2,9 @@
 
 The Worker is the same one used by macOS Clicky; it forwards requests to
 Anthropic, ElevenLabs, and AssemblyAI without exposing API keys to the client.
+HeyBuddy 0.4 adds Gnani routes for Telugu mode (`/gnani/tts`,
+`/gnani/tts-stream`, and the `/gnani/stt-stream` WebSocket, whose URL comes
+from `websocket_url()`); the English routes are unchanged.
 """
 from __future__ import annotations
 
@@ -12,6 +15,9 @@ import requests
 
 from ..utils.constants import (
     WORKER_CHAT_PATH,
+    WORKER_GNANI_STT_REST_PATH,
+    WORKER_GNANI_TTS_PATH,
+    WORKER_GNANI_TTS_STREAM_PATH,
     WORKER_TRANSCRIBE_TOKEN_PATH,
     WORKER_TTS_PATH,
 )
@@ -78,6 +84,22 @@ class CloudflareProxy:
         else:
             self._session.headers.pop(self.SHARED_SECRET_HEADER, None)
 
+    @property
+    def shared_secret(self) -> str:
+        return str(self._session.headers.get(self.SHARED_SECRET_HEADER, "") or "")
+
+    def websocket_url(self, path: str) -> str:
+        """`https://x.workers.dev` + path -> `wss://x.workers.dev/path`."""
+        self._require_configured()
+        if self.base_url.startswith("https://"):
+            return "wss://" + self.base_url[len("https://"):] + path
+        if self.base_url.startswith("http://"):
+            return "ws://" + self.base_url[len("http://"):] + path
+        return self.base_url + path
+
+    def require_configured(self) -> None:
+        self._require_configured()
+
     def _require_configured(self) -> None:
         if not self.base_url or "your-worker" in self.base_url:
             raise RuntimeError(
@@ -111,43 +133,7 @@ class CloudflareProxy:
         if not response.ok:
             raise _build_http_error("/chat", response)
 
-        current_event = "message"
-        data_lines: list[str] = []
-
-        # Anthropic streams UTF-8 but sends `text/event-stream` without a
-        # charset, which makes requests guess ISO-8859-1 and mangle every
-        # non-ASCII character (Telugu, emoji, curly quotes...). Force UTF-8.
-        response.encoding = "utf-8"
-        for raw_line in response.iter_lines(decode_unicode=True):
-            # `iter_lines` yields the chunk between newlines without the
-            # newline. An empty string therefore signals the end-of-event
-            # blank separator.
-            if raw_line is None:
-                continue
-            if raw_line == "":
-                if data_lines:
-                    yield SSEEvent(event=current_event, data="\n".join(data_lines))
-                    data_lines = []
-                    current_event = "message"
-                continue
-            if raw_line.startswith(":"):
-                # Comment / keepalive line; ignore.
-                continue
-            if raw_line.startswith("event:"):
-                current_event = raw_line[len("event:"):].strip()
-                continue
-            if raw_line.startswith("data:"):
-                # SSE spec: strip exactly one leading space if present.
-                payload_segment = raw_line[len("data:"):]
-                if payload_segment.startswith(" "):
-                    payload_segment = payload_segment[1:]
-                data_lines.append(payload_segment)
-                continue
-            # Unknown field; ignore per SSE spec.
-
-        # Flush trailing event if the server closed without a final blank line.
-        if data_lines:
-            yield SSEEvent(event=current_event, data="\n".join(data_lines))
+        yield from iter_sse_events(response)
 
     # ---- /tts ----
     def tts(self, text: str) -> bytes:
@@ -186,8 +172,92 @@ class CloudflareProxy:
         data = resp.json()
         return data.get("token") or data.get("temp_token") or ""
 
+    # ---- Gnani (Telugu mode) ----
+    def gnani_tts(self, body: dict[str, Any]) -> bytes:
+        """Whole clip from Gnani's REST TTS via the Worker (`/gnani/tts`).
+
+        The Worker injects the API key, voice and model; the client sends
+        only `text`, `language`, `speed` and `audio_config`.
+        """
+        self._require_configured()
+        url = f"{self.base_url}{WORKER_GNANI_TTS_PATH}"
+        response = self._session.post(url, json=body, timeout=self.timeout)
+        if not response.ok:
+            raise _build_http_error(WORKER_GNANI_TTS_PATH, response)
+        return response.content
+
+    def gnani_stt_rest(self, wav_bytes: bytes, lang_code: str) -> str:
+        """Transcribe a whole WAV clip (<= 60 s) via `/gnani/stt` (REST)."""
+        self._require_configured()
+        url = f"{self.base_url}{WORKER_GNANI_STT_REST_PATH}"
+        response = self._session.post(
+            url, data=wav_bytes, timeout=self.timeout,
+            headers={"content-type": "audio/wav", "x-heybuddy-lang": lang_code},
+        )
+        if not response.ok:
+            raise _build_http_error(WORKER_GNANI_STT_REST_PATH, response)
+        response.encoding = "utf-8"
+        transcript = response.json().get("transcript") or ""
+        if isinstance(transcript, dict):
+            # multi_lang_codes answers {"te-IN": "...", "en-IN": "..."}.
+            transcript = transcript.get(lang_code) or next(iter(transcript.values()), "")
+        return str(transcript).strip()
+
+    def gnani_tts_stream(self, body: dict[str, Any]) -> Iterator[SSEEvent]:
+        """Gnani's SSE TTS via the Worker (`/gnani/tts-stream`)."""
+        self._require_configured()
+        url = f"{self.base_url}{WORKER_GNANI_TTS_STREAM_PATH}"
+        response = self._session.post(url, json=body, stream=True, timeout=self.timeout)
+        if not response.ok:
+            raise _build_http_error(WORKER_GNANI_TTS_STREAM_PATH, response)
+        try:
+            yield from iter_sse_events(response)
+        finally:
+            response.close()
+
     def close(self) -> None:
         self._session.close()
+
+
+def iter_sse_events(response: requests.Response) -> Iterator[SSEEvent]:
+    """Parse a streamed `text/event-stream` response into `SSEEvent`s."""
+    current_event = "message"
+    data_lines: list[str] = []
+
+    # Anthropic streams UTF-8 but sends `text/event-stream` without a
+    # charset, which makes requests guess ISO-8859-1 and mangle every
+    # non-ASCII character (Telugu, emoji, curly quotes...). Force UTF-8.
+    response.encoding = "utf-8"
+    for raw_line in response.iter_lines(decode_unicode=True):
+        # `iter_lines` yields the chunk between newlines without the
+        # newline. An empty string therefore signals the end-of-event
+        # blank separator.
+        if raw_line is None:
+            continue
+        if raw_line == "":
+            if data_lines:
+                yield SSEEvent(event=current_event, data="\n".join(data_lines))
+                data_lines = []
+                current_event = "message"
+            continue
+        if raw_line.startswith(":"):
+            # Comment / keepalive line; ignore.
+            continue
+        if raw_line.startswith("event:"):
+            current_event = raw_line[len("event:"):].strip()
+            continue
+        if raw_line.startswith("data:"):
+            # SSE spec: strip exactly one leading space if present.
+            payload_segment = raw_line[len("data:"):]
+            if payload_segment.startswith(" "):
+                payload_segment = payload_segment[1:]
+            data_lines.append(payload_segment)
+            continue
+        # Unknown field; ignore per SSE spec.
+
+    # Flush trailing event if the server closed without a final blank line.
+    if data_lines:
+        yield SSEEvent(event=current_event, data="\n".join(data_lines))
 
 
 def _build_http_error(route: str, response: requests.Response) -> RuntimeError:

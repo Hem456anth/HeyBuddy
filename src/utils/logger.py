@@ -8,6 +8,7 @@ from logging.handlers import RotatingFileHandler
 from .constants import APP_NAME, LOGS_DIR
 
 _configured = False
+_latency_logger: logging.Logger | None = None
 
 
 def get_logger(name: str | None = None) -> logging.Logger:
@@ -46,3 +47,19 @@ def _configure_root() -> None:
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(fmt)
     root.addHandler(file_handler)
+
+
+def get_latency_logger() -> logging.Logger:
+    """Stage timings only (see core/latency.py): `logs/latency.log`."""
+    global _latency_logger
+    if _latency_logger is None:
+        get_logger()
+        logger = logging.getLogger(f"{APP_NAME}.latency")
+        logger.setLevel(logging.DEBUG)
+        handler = RotatingFileHandler(
+            LOGS_DIR / "latency.log", maxBytes=250_000, backupCount=2, encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+        logger.addHandler(handler)
+        _latency_logger = logger
+    return _latency_logger

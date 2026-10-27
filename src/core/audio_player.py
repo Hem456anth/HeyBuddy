@@ -10,6 +10,10 @@ Why not pydub (what the first port used):
 * pydub launches ffmpeg without `CREATE_NO_WINDOW`; inside the windowed
   (no-console) .exe every spoken reply flashed a black console window.
 
+Telugu mode (0.4) adds `play_pcm_stream`: Gnani TTS sends raw PCM16 chunks
+over SSE, and playback starts on the first chunk instead of after the whole
+clip (no ffmpeg needed for that path).
+
 Playback uses a private `sounddevice.OutputStream` instead of the global
 `sd.play()` so a start/stop chime can never cut the spoken reply off (both
 used to share sounddevice's single implicit stream).
@@ -20,7 +24,7 @@ import shutil
 import subprocess
 import sys
 import threading
-from typing import Callable
+from typing import Callable, Iterable
 
 import numpy as np
 import sounddevice as sd
@@ -100,6 +104,24 @@ class AudioPlayer:
         )
         self._thread.start()
 
+    def play_pcm_stream(
+        self,
+        chunks: Iterable[bytes],
+        sample_rate: int = PLAYBACK_SAMPLE_RATE,
+        on_finished: Callable[[], None] | None = None,
+        on_started: Callable[[], None] | None = None,
+    ) -> None:
+        """Play raw PCM16 mono chunks as they arrive (streaming TTS)."""
+        self.stop()
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._stream_worker,
+            args=(chunks, sample_rate, self._stop_event, on_started, on_finished),
+            name="AudioPlayerStream",
+            daemon=True,
+        )
+        self._thread.start()
+
     def stop(self) -> None:
         self._stop_event.set()
         worker = self._thread
@@ -142,6 +164,63 @@ class AudioPlayer:
             self._is_playing = False
             # A stopped clip was superseded on purpose; whoever stopped it owns
             # the next state transition, so don't fire on_finished.
+            if on_finished and not was_stopped:
+                try:
+                    on_finished()
+                except Exception:
+                    log.exception("AudioPlayer on_finished callback raised")
+
+    def _stream_worker(
+        self,
+        chunks: Iterable[bytes],
+        sample_rate: int,
+        stop_event: threading.Event,
+        on_started: Callable[[], None] | None,
+        on_finished: Callable[[], None] | None,
+    ) -> None:
+        was_stopped = False
+        output_stream = None
+        leftover = b""
+        try:
+            for chunk in chunks:
+                if stop_event.is_set():
+                    was_stopped = True
+                    break
+                data = leftover + (chunk or b"")
+                # PCM16 needs whole samples; carry an odd trailing byte over.
+                usable = len(data) - (len(data) % 2)
+                leftover = data[usable:]
+                if usable == 0:
+                    continue
+                if output_stream is None:
+                    output_stream = sd.OutputStream(
+                        samplerate=sample_rate, channels=1, dtype="int16", blocksize=1024,
+                    )
+                    output_stream.start()
+                    self._is_playing = True
+                    if on_started:
+                        try:
+                            on_started()
+                        except Exception:
+                            log.exception("AudioPlayer on_started callback raised")
+                samples = np.frombuffer(data[:usable], dtype=np.int16)
+                for block_start in range(0, len(samples), 1024):
+                    if stop_event.is_set():
+                        was_stopped = True
+                        break
+                    output_stream.write(samples[block_start:block_start + 1024])
+                if was_stopped:
+                    break
+        except Exception:
+            log.exception("AudioPlayer stream failed")
+        finally:
+            if output_stream is not None:
+                try:
+                    output_stream.stop()
+                    output_stream.close()
+                except Exception:
+                    log.debug("Closing the output stream failed", exc_info=True)
+            self._is_playing = False
             if on_finished and not was_stopped:
                 try:
                     on_finished()

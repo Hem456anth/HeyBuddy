@@ -1,5 +1,5 @@
 ; HeyBuddy installer (Inno Setup 6). Built in CI:
-;   iscc /DAppVersion=0.3.0 /DSourceExe=..\dist\HeyBuddy.exe installer\heybuddy.iss
+;   iscc /DAppVersion=0.4.0 /DSourceExe=..\dist\HeyBuddy.exe installer\heybuddy.iss
 ;
 ; * Per-user install (no admin prompt) into %LOCALAPPDATA%\Programs\HeyBuddy,
 ;   like HeyClicky's Velopack install under %LOCALAPPDATA%.
@@ -9,7 +9,7 @@
 ;   %APPDATA%\HeyBuddy are kept unless the user ticks the box.
 
 #ifndef AppVersion
-  #define AppVersion "0.3.0"
+  #define AppVersion "0.4.0"
 #endif
 #ifndef SourceExe
   #define SourceExe "..\dist\HeyBuddy.exe"

@@ -17,3 +17,8 @@ compatibility_date = "2024-01-01"
 
 [vars]
 ELEVENLABS_VOICE_ID = "kPzsL2i3teMYv0FxEYQ6"
+# Telugu mode (Gnani Vachana). GNANI_API_KEY is a secret:
+#   npx wrangler secret put GNANI_API_KEY
+# Timbre v2.5 Telugu voices: Suhana, Lehara, Lavanya, Yukti, Varuni
+GNANI_TTS_VOICE = "Varuni"
+GNANI_TTS_MODEL = "timbre-v2.5"
